@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
   const transcription = await openai.audio.transcriptions.create({
     file,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "whisper-1",
+    model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
   });
 
   return NextResponse.json({ text: transcription.text });

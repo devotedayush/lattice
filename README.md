@@ -10,7 +10,7 @@ Lattice V1 is a prototype for a living team state interface. The first screen is
 - Supabase-backed Team Field persistence via `/api/team-state`
 - Supabase email/password auth with demo team membership policies
 - OpenAI Chat Completions for state interpretation
-- OpenAI audio transcription route for voice updates, defaulting to `whisper-1`
+- OpenAI audio transcription route for voice updates, defaulting to `gpt-4o-mini-transcribe`
 
 ## Run
 
@@ -24,7 +24,7 @@ Create `.env.local` from `.env.example` when you want live AI and Supabase wirin
 ```bash
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.4-mini
-OPENAI_TRANSCRIBE_MODEL=whisper-1
+OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...

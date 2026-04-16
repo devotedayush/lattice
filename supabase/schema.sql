@@ -1,8 +1,12 @@
 create extension if not exists pgcrypto;
 
+-- ============================================================
+-- Enums
+-- ============================================================
+
 do $$
 begin
-  create type public.lattice_object_type as enum (
+  create type public.orgmind_object_type as enum (
     'intent',
     'promise',
     'blocker',
@@ -17,7 +21,7 @@ end $$;
 
 do $$
 begin
-  create type public.lattice_request_state as enum (
+  create type public.orgmind_request_state as enum (
     'draft',
     'sent',
     'acknowledged',
@@ -27,6 +31,67 @@ begin
 exception
   when duplicate_object then null;
 end $$;
+
+do $$
+begin
+  create type public.lattice_goal_state as enum (
+    'active',
+    'paused',
+    'achieved',
+    'dropped',
+    'superseded'
+  );
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.lattice_change_kind as enum (
+    'goal_shift',
+    'scope_change',
+    'priority_change',
+    'deadline_move',
+    'owner_change',
+    'blocker_emerged',
+    'blocker_resolved',
+    'assumption_invalidated',
+    'confidence_change',
+    'commitment_added',
+    'commitment_completed',
+    'commitment_stale'
+  );
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.lattice_assumption_state as enum (
+    'holds',
+    'at_risk',
+    'invalidated',
+    'reconfirmed'
+  );
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.lattice_intervention_state as enum (
+    'suggested',
+    'accepted',
+    'dismissed',
+    'acted'
+  );
+exception
+  when duplicate_object then null;
+end $$;
+
+-- ============================================================
+-- V1 tables (team spaces, members, field objects, memory, etc.)
+-- ============================================================
 
 create table if not exists public.team_spaces (
   id text primary key default gen_random_uuid()::text,
@@ -57,7 +122,7 @@ where user_id is not null;
 create table if not exists public.field_objects (
   id text primary key default gen_random_uuid()::text,
   team_space_id text not null references public.team_spaces(id) on delete cascade,
-  type public.lattice_object_type not null,
+  type public.orgmind_object_type not null,
   title text not null,
   detail text not null,
   owner text,
@@ -74,7 +139,7 @@ create table if not exists public.field_objects (
 create table if not exists public.memory_events (
   id text primary key default gen_random_uuid()::text,
   team_space_id text not null references public.team_spaces(id) on delete cascade,
-  kind public.lattice_object_type,
+  kind public.orgmind_object_type,
   text text not null,
   created_at timestamptz not null default now()
 );
@@ -85,7 +150,7 @@ create table if not exists public.delegated_requests (
   target text not null,
   ask text not null,
   why text not null,
-  state public.lattice_request_state not null default 'draft',
+  state public.orgmind_request_state not null default 'draft',
   linked_to text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -112,6 +177,93 @@ create table if not exists public.interpretations (
   broadcast jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now()
 );
+
+-- ============================================================
+-- V2 tables (goals, change events, assumptions, dependencies,
+-- confidence signals, interventions)
+-- ============================================================
+
+create table if not exists public.goals (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  title text not null,
+  detail text,
+  state public.lattice_goal_state not null default 'active',
+  priority integer not null default 1,
+  confidence numeric not null default 0.7 check (confidence >= 0 and confidence <= 1),
+  previous_goal_id text references public.goals(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.change_events (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  kind public.lattice_change_kind not null,
+  summary text not null,
+  detail text,
+  target_id text,
+  target_type text,
+  previous_value jsonb,
+  new_value jsonb,
+  source text,
+  reported_by uuid references auth.users(id) on delete set null,
+  impact jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.assumptions (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  statement text not null,
+  state public.lattice_assumption_state not null default 'holds',
+  tied_to text,
+  last_checked_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.dependencies (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  source_id text not null,
+  target_kind text not null,
+  target_ref text not null,
+  note text,
+  resolved_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.confidence_signals (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  target_id text not null,
+  target_type text not null,
+  confidence numeric not null check (confidence >= 0 and confidence <= 1),
+  note text,
+  reported_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.interventions (
+  id text primary key,
+  team_space_id text not null references public.team_spaces(id) on delete cascade,
+  title text not null,
+  rationale text not null,
+  action_kind text not null,
+  urgency integer not null default 2 check (urgency >= 1 and urgency <= 5),
+  target_id text,
+  target_type text,
+  state public.lattice_intervention_state not null default 'suggested',
+  dismissed_at timestamptz,
+  acted_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- ============================================================
+-- Shared functions + triggers
+-- ============================================================
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -144,13 +296,44 @@ create trigger set_reminders_updated_at
 before update on public.reminders
 for each row execute function public.set_updated_at();
 
+drop trigger if exists goals_set_updated_at on public.goals;
+create trigger goals_set_updated_at
+before update on public.goals
+for each row execute function public.set_updated_at();
+
+drop trigger if exists assumptions_set_updated_at on public.assumptions;
+create trigger assumptions_set_updated_at
+before update on public.assumptions
+for each row execute function public.set_updated_at();
+
+drop trigger if exists interventions_set_updated_at on public.interventions;
+create trigger interventions_set_updated_at
+before update on public.interventions
+for each row execute function public.set_updated_at();
+
+-- ============================================================
+-- Indexes
+-- ============================================================
+
 create index if not exists field_objects_team_space_idx on public.field_objects(team_space_id);
 create index if not exists memory_events_team_space_created_idx on public.memory_events(team_space_id, created_at desc);
 create index if not exists delegated_requests_team_space_idx on public.delegated_requests(team_space_id);
 create index if not exists reminders_team_space_idx on public.reminders(team_space_id);
 create index if not exists interpretations_team_space_created_idx on public.interpretations(team_space_id, created_at desc);
 
-create or replace function public.is_lattice_team_member(target_team_space_id text)
+create index if not exists goals_team_idx on public.goals(team_space_id);
+create index if not exists change_events_team_idx on public.change_events(team_space_id, created_at desc);
+create index if not exists change_events_kind_idx on public.change_events(team_space_id, kind);
+create index if not exists assumptions_team_idx on public.assumptions(team_space_id);
+create index if not exists dependencies_team_idx on public.dependencies(team_space_id);
+create index if not exists confidence_signals_target_idx on public.confidence_signals(team_space_id, target_id, created_at desc);
+create index if not exists interventions_team_idx on public.interventions(team_space_id, state, created_at desc);
+
+-- ============================================================
+-- Membership helper + new-user trigger
+-- ============================================================
+
+create or replace function public.is_orgmind_team_member(target_team_space_id text)
 returns boolean
 language sql
 stable
@@ -165,7 +348,7 @@ as $$
   );
 $$;
 
-create or replace function public.handle_new_lattice_user()
+create or replace function public.handle_new_orgmind_user()
 returns trigger
 language plpgsql
 security definer
@@ -185,10 +368,14 @@ begin
 end;
 $$;
 
-drop trigger if exists on_auth_user_created_add_lattice_member on auth.users;
-create trigger on_auth_user_created_add_lattice_member
+drop trigger if exists on_auth_user_created_add_orgmind_member on auth.users;
+create trigger on_auth_user_created_add_orgmind_member
 after insert on auth.users
-for each row execute function public.handle_new_lattice_user();
+for each row execute function public.handle_new_orgmind_user();
+
+-- ============================================================
+-- Row-level security
+-- ============================================================
 
 alter table public.team_spaces enable row level security;
 alter table public.team_members enable row level security;
@@ -197,106 +384,184 @@ alter table public.memory_events enable row level security;
 alter table public.delegated_requests enable row level security;
 alter table public.reminders enable row level security;
 alter table public.interpretations enable row level security;
+alter table public.goals enable row level security;
+alter table public.change_events enable row level security;
+alter table public.assumptions enable row level security;
+alter table public.dependencies enable row level security;
+alter table public.confidence_signals enable row level security;
+alter table public.interventions enable row level security;
+
+-- V1 policies
 
 drop policy if exists "Demo users can read team spaces" on public.team_spaces;
 create policy "Demo users can read team spaces"
 on public.team_spaces for select
 to authenticated
-using (public.is_lattice_team_member(id));
+using (public.is_orgmind_team_member(id));
 
 drop policy if exists "Demo users can update team spaces" on public.team_spaces;
 create policy "Demo users can update team spaces"
 on public.team_spaces for update
 to authenticated
-using (public.is_lattice_team_member(id))
-with check (public.is_lattice_team_member(id));
+using (public.is_orgmind_team_member(id))
+with check (public.is_orgmind_team_member(id));
 
 drop policy if exists "Demo users can read team members" on public.team_members;
 create policy "Demo users can read team members"
 on public.team_members for select
 to authenticated
-using (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can read field state" on public.field_objects;
 create policy "Demo users can read field state"
 on public.field_objects for select
 to authenticated
-using (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can create field state" on public.field_objects;
 create policy "Demo users can create field state"
 on public.field_objects for insert
 to authenticated
-with check (public.is_lattice_team_member(team_space_id));
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can update field state" on public.field_objects;
 create policy "Demo users can update field state"
 on public.field_objects for update
 to authenticated
-using (public.is_lattice_team_member(team_space_id))
-with check (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id))
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can read memory" on public.memory_events;
 create policy "Demo users can read memory"
 on public.memory_events for select
 to authenticated
-using (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can create memory" on public.memory_events;
 create policy "Demo users can create memory"
 on public.memory_events for insert
 to authenticated
-with check (public.is_lattice_team_member(team_space_id));
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can read delegated requests" on public.delegated_requests;
 create policy "Demo users can read delegated requests"
 on public.delegated_requests for select
 to authenticated
-using (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can create delegated requests" on public.delegated_requests;
 create policy "Demo users can create delegated requests"
 on public.delegated_requests for insert
 to authenticated
-with check (public.is_lattice_team_member(team_space_id));
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can update delegated requests" on public.delegated_requests;
 create policy "Demo users can update delegated requests"
 on public.delegated_requests for update
 to authenticated
-using (public.is_lattice_team_member(team_space_id))
-with check (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id))
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can read reminders" on public.reminders;
 create policy "Demo users can read reminders"
 on public.reminders for select
 to authenticated
-using (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can create reminders" on public.reminders;
 create policy "Demo users can create reminders"
 on public.reminders for insert
 to authenticated
-with check (public.is_lattice_team_member(team_space_id));
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can update reminders" on public.reminders;
 create policy "Demo users can update reminders"
 on public.reminders for update
 to authenticated
-using (public.is_lattice_team_member(team_space_id))
-with check (public.is_lattice_team_member(team_space_id));
+using (public.is_orgmind_team_member(team_space_id))
+with check (public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can read interpretations" on public.interpretations;
 create policy "Demo users can read interpretations"
 on public.interpretations for select
 to authenticated
-using (team_space_id is null or public.is_lattice_team_member(team_space_id));
+using (team_space_id is null or public.is_orgmind_team_member(team_space_id));
 
 drop policy if exists "Demo users can create interpretations" on public.interpretations;
 create policy "Demo users can create interpretations"
 on public.interpretations for insert
 to authenticated
-with check (team_space_id is null or public.is_lattice_team_member(team_space_id));
+with check (team_space_id is null or public.is_orgmind_team_member(team_space_id));
+
+-- V2 policies
+
+drop policy if exists goals_member_read on public.goals;
+create policy goals_member_read on public.goals for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists goals_member_write on public.goals;
+create policy goals_member_write on public.goals for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists goals_member_update on public.goals;
+create policy goals_member_update on public.goals for update
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists change_events_member_read on public.change_events;
+create policy change_events_member_read on public.change_events for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists change_events_member_write on public.change_events;
+create policy change_events_member_write on public.change_events for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists assumptions_member_read on public.assumptions;
+create policy assumptions_member_read on public.assumptions for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists assumptions_member_write on public.assumptions;
+create policy assumptions_member_write on public.assumptions for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists assumptions_member_update on public.assumptions;
+create policy assumptions_member_update on public.assumptions for update
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists dependencies_member_read on public.dependencies;
+create policy dependencies_member_read on public.dependencies for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists dependencies_member_write on public.dependencies;
+create policy dependencies_member_write on public.dependencies for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists dependencies_member_update on public.dependencies;
+create policy dependencies_member_update on public.dependencies for update
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists confidence_signals_member_read on public.confidence_signals;
+create policy confidence_signals_member_read on public.confidence_signals for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists confidence_signals_member_write on public.confidence_signals;
+create policy confidence_signals_member_write on public.confidence_signals for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists interventions_member_read on public.interventions;
+create policy interventions_member_read on public.interventions for select
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists interventions_member_write on public.interventions;
+create policy interventions_member_write on public.interventions for insert
+to authenticated with check (public.is_orgmind_team_member(team_space_id));
+
+drop policy if exists interventions_member_update on public.interventions;
+create policy interventions_member_update on public.interventions for update
+to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+-- ============================================================
+-- Seed data (demo team space)
+-- ============================================================
 
 insert into public.team_spaces (id, name, active_intent, tensions, broadcast)
 values (
