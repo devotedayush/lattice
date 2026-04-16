@@ -1,9 +1,45 @@
 import { NextResponse } from "next/server";
+import OpenAI from "openai";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
 import { getUserActiveTeam } from "@/lib/teams";
-import { goalDrift, structuralAnalysis } from "@/lib/v2";
+import { goalDrift, structuralAnalysis, type LatticeState } from "@/lib/v2";
 import { fetchLatticeState } from "@/lib/v2-db";
+
+// Use one GPT call to classify each commitment vs. the active goal as
+// aligned / drifting / unsure. Returns the drifting commitment IDs. If GPT
+// is unavailable, returns empty (caller falls back to keyword-based drift).
+async function aiGoalAlignment(state: LatticeState): Promise<string[]> {
+  const goal = state.goals.find((g) => g.state === "active");
+  const commitments = state.fieldObjects.filter((f) => f.type === "promise");
+  if (!goal || commitments.length === 0 || !process.env.OPENAI_API_KEY) return [];
+
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const list = commitments.map((c) => `${c.id}: ${c.title} — ${c.detail}`).join("\n");
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You classify commitments against a team's active goal. For each commitment, decide whether it clearly ladders up to the goal. Reply ONLY with a JSON object: { \"drifting\": [\"id1\", \"id2\"] } — list the IDs that DO NOT ladder up. No prose.",
+        },
+        {
+          role: "user",
+          content: `Goal: ${goal.title}\n${goal.detail ? `Detail: ${goal.detail}\n` : ""}\nCommitments:\n${list}`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+    });
+    const raw = completion.choices[0]?.message?.content ?? "{}";
+    const parsed = JSON.parse(raw) as { drifting?: string[] };
+    return Array.isArray(parsed.drifting) ? parsed.drifting : [];
+  } catch {
+    return [];
+  }
+}
 
 // POST /api/v2/analyze { teamId? }
 //
@@ -44,12 +80,21 @@ export async function POST(request: Request) {
       targetType?: string;
     }> = [];
 
-    // Goal drift
+    // Goal drift — prefer AI alignment, fall back to keyword heuristic
+    const aiDriftIds = await aiGoalAlignment(state);
     const drift = goalDrift(state);
-    if (drift.driftingCommitments.length >= 2) {
+    const driftingIds = aiDriftIds.length
+      ? aiDriftIds
+      : drift.driftingCommitments.map((c) => c.id);
+    if (driftingIds.length >= 2) {
+      const titles = state.fieldObjects
+        .filter((f) => driftingIds.includes(f.id))
+        .map((f) => `"${f.title}"`)
+        .slice(0, 3)
+        .join(", ");
       candidates.push({
         title: "Re-anchor drifting commitments to the goal",
-        rationale: `${drift.driftingCommitments.length} commitments don't clearly ladder up to the active goal. Either re-frame them or drop them.`,
+        rationale: `${driftingIds.length} commitments don't clearly ladder up to the active goal (${titles}). Either re-frame them or drop them.`,
         actionKind: "realign",
         urgency: 4,
         targetType: "goal",

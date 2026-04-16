@@ -61,6 +61,26 @@ export default function Page() {
   const [teamPanel, setTeamPanel] = useState<"none" | "create" | "manage">("none");
   const [simulating, setSimulating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<string>("watching");
+  const [updatedIds, setUpdatedIds] = useState<Set<string>>(new Set());
+  const markUpdated = useCallback((ids: string[]) => {
+    if (!ids.length) return;
+    setUpdatedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
+    setLiveStatus("change just landed");
+    setTimeout(() => {
+      setUpdatedIds((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
+      setLiveStatus("watching");
+    }, 2400);
+  }, []);
 
   useEffect(() => {
     if (!supabase) {
@@ -138,33 +158,38 @@ export default function Page() {
   // Supabase realtime: refresh state when anything in this team changes
   useEffect(() => {
     if (!supabase || !activeTeam) return;
+    const bump = (payload: { new?: { id?: string }; old?: { id?: string } }) => {
+      const id = payload?.new?.id ?? payload?.old?.id;
+      if (id) markUpdated([id]);
+      void loadState(activeTeam.id);
+    };
     const channel = supabase
       .channel(`lattice-${activeTeam.id}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "change_events", filter: `team_space_id=eq.${activeTeam.id}` },
-        () => void loadState(activeTeam.id),
+        bump,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "interventions", filter: `team_space_id=eq.${activeTeam.id}` },
-        () => void loadState(activeTeam.id),
+        bump,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "goals", filter: `team_space_id=eq.${activeTeam.id}` },
-        () => void loadState(activeTeam.id),
+        bump,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "field_objects", filter: `team_space_id=eq.${activeTeam.id}` },
-        () => void loadState(activeTeam.id),
+        bump,
       )
       .subscribe();
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [supabase, activeTeam, loadState]);
+  }, [supabase, activeTeam, loadState, markUpdated]);
 
   const teamId = activeTeam?.id;
 
@@ -182,6 +207,27 @@ export default function Page() {
       }
     } finally {
       setSimulating(false);
+    }
+  };
+
+  const runSeed = async () => {
+    if (!teamId) return;
+    if (!confirm("This will wipe and reload demo data for this team. Continue?")) return;
+    setSeeding(true);
+    setLiveStatus("seeding demo story…");
+    try {
+      const res = await authedFetch("/api/v2/demo-seed", {
+        method: "POST",
+        body: JSON.stringify({ teamId, reset: true }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { state: LatticeState };
+        if (data.state) setState(data.state);
+        setLiveStatus("demo loaded");
+        setTimeout(() => setLiveStatus("watching"), 2000);
+      }
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -237,6 +283,9 @@ export default function Page() {
         onSwitch={(t) => setActiveTeam(t)}
         onCreate={() => setTeamPanel("create")}
         onManage={() => setTeamPanel("manage")}
+        liveStatus={liveStatus}
+        onSeed={runSeed}
+        seeding={seeding}
       />
 
       <Tabs tab={tab} onChange={setTab} />
@@ -252,19 +301,21 @@ export default function Page() {
           onAnalyze={runAnalyze}
           simulating={simulating}
           analyzing={analyzing}
+          updatedIds={updatedIds}
         />
       )}
-      {tab === "timeline" && <TimelineView state={state} />}
+      {tab === "timeline" && <TimelineView state={state} updatedIds={updatedIds} />}
       {tab === "interventions" && (
         <InterventionsView
           state={state}
           authedFetch={authedFetch}
           onRefresh={setState}
           teamId={teamId}
+          updatedIds={updatedIds}
         />
       )}
       {tab === "commitments" && (
-        <CommitmentsView state={state} authedFetch={authedFetch} teamId={teamId} onState={setState} />
+        <CommitmentsView state={state} authedFetch={authedFetch} teamId={teamId} onState={setState} updatedIds={updatedIds} />
       )}
 
       <VoiceDock onClick={() => setComposerOpen(true)} />
@@ -318,6 +369,9 @@ function Topbar({
   onSwitch,
   onCreate,
   onManage,
+  liveStatus,
+  onSeed,
+  seeding,
 }: {
   email: string;
   onSignOut: () => void;
@@ -326,15 +380,22 @@ function Topbar({
   onSwitch: (t: TeamSummary) => void;
   onCreate: () => void;
   onManage: () => void;
+  liveStatus: string;
+  onSeed: () => void;
+  seeding: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="topbar">
       <div className="brand">
-        <span className="brand-dot" aria-hidden />
+        <span className="brand-dot breathing" aria-hidden />
         Lattice
+        <span className="live-status" aria-live="polite">{liveStatus}</span>
       </div>
       <div className="topbar-actions">
+        <button className="btn-ghost small" onClick={onSeed} disabled={seeding || !activeTeam} title="Wipe + load a rich demo story">
+          {seeding ? "Loading…" : "Load demo"}
+        </button>
         <div className="team-switch" style={{ position: "relative" }}>
           <button className="btn-ghost small" onClick={() => setOpen((o) => !o)}>
             {activeTeam ? activeTeam.name : "No team"} ▾
@@ -836,6 +897,7 @@ function PulseView({
   onAnalyze,
   simulating,
   analyzing,
+  updatedIds,
 }: {
   state: LatticeState;
   onOpenComposer: () => void;
@@ -846,6 +908,7 @@ function PulseView({
   onAnalyze: () => void;
   simulating: boolean;
   analyzing: boolean;
+  updatedIds: Set<string>;
 }) {
   const activeGoal = state.goals.find((g) => g.state === "active");
   const conf = teamConfidence(state);
@@ -888,6 +951,14 @@ function PulseView({
               {activeGoal?.title ?? state.intent ?? "No goal set yet."}
             </h1>
             {activeGoal?.detail && <p className="hero-detail">{activeGoal.detail}</p>}
+            {activeGoal && (
+              <ConfidenceSparkline
+                signals={state.confidenceSignals.filter(
+                  (s) => s.targetType === "goal" && s.targetId === activeGoal.id,
+                )}
+                current={conf}
+              />
+            )}
           </>
         )}
         <div className="hero-actions">
@@ -932,6 +1003,8 @@ function PulseView({
         </div>
       </div>
 
+      <AskLattice authedFetch={authedFetch} teamId={teamId} />
+
       <section className="section">
         <div className="section-head">
           <h2 className="section-title">What changed</h2>
@@ -942,7 +1015,7 @@ function PulseView({
         ) : (
           <div className="timeline">
             {recentChanges.map((ev) => (
-              <TimelineItem key={ev.id} ev={ev} />
+              <TimelineItem key={ev.id} ev={ev} flash={updatedIds.has(ev.id)} />
             ))}
           </div>
         )}
@@ -1041,7 +1114,7 @@ function GoalEditor({
 // Timeline (Plan vs Reality)
 // ----------------------------------------------------------------------
 
-function TimelineView({ state }: { state: LatticeState }) {
+function TimelineView({ state, updatedIds }: { state: LatticeState; updatedIds: Set<string> }) {
   const drift = goalDrift(state);
   const analysis = structuralAnalysis(state);
   const activeGoal = state.goals.find((g) => g.state === "active");
@@ -1109,7 +1182,7 @@ function TimelineView({ state }: { state: LatticeState }) {
         ) : (
           <div className="timeline">
             {state.changeEvents.map((ev) => (
-              <TimelineItem key={ev.id} ev={ev} detailed />
+              <TimelineItem key={ev.id} ev={ev} detailed flash={updatedIds.has(ev.id)} />
             ))}
           </div>
         )}
@@ -1148,10 +1221,10 @@ function TimelineView({ state }: { state: LatticeState }) {
   );
 }
 
-function TimelineItem({ ev, detailed }: { ev: ChangeEvent; detailed?: boolean }) {
+function TimelineItem({ ev, detailed, flash }: { ev: ChangeEvent; detailed?: boolean; flash?: boolean }) {
   const accent = accentForChangeKind(ev.kind);
   return (
-    <div className="timeline-item">
+    <div className={`timeline-item${flash ? " just-updated" : ""}`}>
       <div className={`timeline-glyph ${accent}`}>{glyphForChangeKind(ev.kind)}</div>
       <div className="timeline-body">
         <div className="timeline-kind">{labelForChangeKind(ev.kind)}</div>
@@ -1175,11 +1248,13 @@ function InterventionsView({
   authedFetch,
   onRefresh,
   teamId,
+  updatedIds,
 }: {
   state: LatticeState;
   authedFetch: AuthedFetch;
   onRefresh: (next: LatticeState) => void;
   teamId: string | undefined;
+  updatedIds: Set<string>;
 }) {
   const suggested = state.interventions
     .filter((i) => i.state === "suggested")
@@ -1209,7 +1284,7 @@ function InterventionsView({
         ) : (
           <div className="intervention-list">
             {suggested.map((iv) => (
-              <InterventionCard key={iv.id} iv={iv} onPatch={patch} />
+              <InterventionCard key={iv.id} iv={iv} onPatch={patch} flash={updatedIds.has(iv.id)} />
             ))}
           </div>
         )}
@@ -1242,9 +1317,11 @@ function InterventionsView({
 function InterventionCard({
   iv,
   onPatch,
+  flash,
 }: {
   iv: Intervention;
   onPatch: (id: string, state: InterventionState) => Promise<void>;
+  flash?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const doPatch = async (next: InterventionState) => {
@@ -1256,7 +1333,7 @@ function InterventionCard({
     }
   };
   return (
-    <div className={`intervention ${iv.urgency >= 4 ? "urgent" : ""}`}>
+    <div className={`intervention ${iv.urgency >= 4 ? "urgent" : ""}${flash ? " just-updated" : ""}`}>
       <div>
         <div className="intervention-title">
           {iv.title}
@@ -1287,11 +1364,13 @@ function CommitmentsView({
   authedFetch,
   teamId,
   onState,
+  updatedIds,
 }: {
   state: LatticeState;
   authedFetch: AuthedFetch;
   teamId: string | undefined;
   onState: (s: LatticeState) => void;
+  updatedIds: Set<string>;
 }) {
   const act = async (id: string, action: "complete" | "resolve" | "drop") => {
     const res = await authedFetch("/api/v2/commitment", {
@@ -1333,7 +1412,7 @@ function CommitmentsView({
           </div>
           <div className="commitment-list">
             {g.items.map((f) => (
-              <CommitmentRow key={f.id} f={f} onAct={act} />
+              <CommitmentRow key={f.id} f={f} onAct={act} flash={updatedIds.has(f.id)} />
             ))}
           </div>
         </section>
@@ -1369,9 +1448,11 @@ function CommitmentsView({
 function CommitmentRow({
   f,
   onAct,
+  flash,
 }: {
   f: FieldObject;
   onAct: (id: string, action: "complete" | "resolve" | "drop") => Promise<void>;
+  flash?: boolean;
 }) {
   const confClass = f.confidence < 0.4 ? "low" : f.confidence < 0.7 ? "mid" : "";
   const [busy, setBusy] = useState(false);
@@ -1385,7 +1466,7 @@ function CommitmentRow({
     }
   };
   return (
-    <div className="commitment" style={closed ? { opacity: 0.55 } : undefined}>
+    <div className={`commitment${flash ? " just-updated" : ""}`} style={closed ? { opacity: 0.55 } : undefined}>
       <div>
         <div className="commitment-title">{f.title}</div>
         <div className="commitment-meta">
@@ -1415,6 +1496,137 @@ function CommitmentRow({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// Inline question-answering: ask Lattice anything about the team.
+function AskLattice({
+  authedFetch,
+  teamId,
+}: {
+  authedFetch: AuthedFetch;
+  teamId: string | undefined;
+}) {
+  const [q, setQ] = useState("");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const samples = [
+    "Where are we most at risk?",
+    "Who's overloaded?",
+    "What changed since yesterday?",
+    "Is the goal still realistic?",
+  ];
+
+  const ask = async (text: string) => {
+    if (!text.trim() || !teamId) return;
+    setBusy(true);
+    setAnswer(null);
+    try {
+      const res = await authedFetch("/api/v2/ask", {
+        method: "POST",
+        body: JSON.stringify({ query: text.trim(), teamId }),
+      });
+      const data = (await res.json()) as { answer?: string; error?: string };
+      setAnswer(data.answer ?? data.error ?? "No answer.");
+    } catch (e) {
+      setAnswer(e instanceof Error ? e.message : "Ask failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="section ask-section">
+      <div className="ask-box">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void ask(q);
+          }}
+          className="ask-form"
+        >
+          <input
+            className="ask-input"
+            type="text"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Ask Lattice about your team…"
+          />
+          <button type="submit" className="btn-primary small" disabled={busy || !q.trim()}>
+            {busy ? "…" : "Ask"}
+          </button>
+        </form>
+        <div className="ask-samples">
+          {samples.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="sample-chip"
+              onClick={() => {
+                setQ(s);
+                void ask(s);
+              }}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        {busy && (
+          <div className="ask-answer thinking">
+            <span className="dot" /> <span className="dot" /> <span className="dot" />
+          </div>
+        )}
+        {!busy && answer && <div className="ask-answer">{answer}</div>}
+      </div>
+    </section>
+  );
+}
+
+// Confidence sparkline — rendered under the active goal.
+function ConfidenceSparkline({
+  signals,
+  current,
+}: {
+  signals: { createdAt: string; confidence: number }[];
+  current: number;
+}) {
+  const points = useMemo(() => {
+    const sorted = [...signals].sort(
+      (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
+    );
+    const vals = sorted.map((s) => s.confidence);
+    if (vals.length < 2) {
+      // Fabricate a flat baseline so there's always something to show.
+      return vals.length === 1 ? [vals[0], current] : [current, current];
+    }
+    return vals;
+  }, [signals, current]);
+
+  const w = 160;
+  const h = 28;
+  const last = points[points.length - 1] ?? current;
+  const color = last < 0.5 ? "var(--warn)" : last < 0.75 ? "var(--warm)" : "var(--accent)";
+  const d = points
+    .map((v, i) => {
+      const x = (i / Math.max(1, points.length - 1)) * w;
+      const y = h - v * h;
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <div className="sparkline" title="Goal confidence over time">
+      <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <path d={d} fill="none" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+        <circle
+          cx={w}
+          cy={h - last * h}
+          r={2.4}
+          fill={color}
+        />
+      </svg>
+      <span className="sparkline-label">{Math.round(last * 100)}% confidence</span>
     </div>
   );
 }
