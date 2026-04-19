@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
-import { LATTICE_PERSONA } from "@/lib/persona";
+import { APP_KNOWLEDGE, LATTICE_PERSONA } from "@/lib/persona";
 import { getUserActiveTeam } from "@/lib/teams";
 import { atRiskCount, goalDrift, structuralAnalysis, teamConfidence } from "@/lib/v2";
 import { fetchLatticeState } from "@/lib/v2-db";
@@ -94,6 +94,7 @@ Prior turns in this conversation are included for continuity so follow-ups like 
       model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
       messages: [
         { role: "system", content: systemPrompt },
+        { role: "system", content: APP_KNOWLEDGE },
         { role: "system", content: `Current state (source of truth):\n\n${context}` },
         ...history,
         { role: "user", content: query },

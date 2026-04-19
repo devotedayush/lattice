@@ -18,7 +18,12 @@ export async function PATCH(
 
   const { teamId } = await params;
 
-  let body: { skills?: string[]; focus?: string | null; bio?: string | null };
+  let body: {
+    name?: string;
+    skills?: string[];
+    focus?: string | null;
+    bio?: string | null;
+  };
   try {
     body = await request.json();
   } catch {
@@ -42,6 +47,9 @@ export async function PATCH(
       { status: 403 },
     );
   }
+
+  const name =
+    typeof body.name === "string" ? body.name.trim().slice(0, 60) || undefined : undefined;
 
   const skills = Array.isArray(body.skills)
     ? Array.from(
@@ -71,6 +79,7 @@ export async function PATCH(
     await updateMemberProfile(auth.supabase, {
       teamSpaceId: teamId,
       memberId: me.id,
+      name,
       skills,
       focus,
       bio,

@@ -207,12 +207,14 @@ export async function updateMemberProfile(
   params: {
     teamSpaceId: string;
     memberId: string;
+    name?: string;
     skills?: string[];
     focus?: string | null;
     bio?: string | null;
   },
 ): Promise<void> {
   const patch: Record<string, unknown> = {};
+  if (params.name !== undefined) patch.name = params.name;
   if (params.skills !== undefined) patch.skills = params.skills;
   if (params.focus !== undefined) patch.focus = params.focus;
   if (params.bio !== undefined) patch.bio = params.bio;

@@ -27,3 +27,29 @@ Never say:
 - No emoji. No exclamation points. No all-caps.
 
 You speak to one person — usually a founder or PM — who is busy, smart, and doesn't need things softened.`;
+
+// Canonical reference Lattice uses when a user asks what a term means or
+// how the app works. Keep it concrete and short — this gets injected into
+// the ask prompt, so every extra token is money.
+export const APP_KNOWLEDGE = `Lattice ontology — the seven primitives you track:
+
+- Intent: what the team is trying to do — a direction or goal. Not a task. Example: "Ship a demo people trust by Friday."
+- Commitment (also called "promise" in the code): a concrete thing someone has agreed to deliver. Has an owner, optional due date, status (new/done/dropped), and a confidence score. Example: "Demo video — know2, due Fri, 80% confidence."
+- Blocker: something stopping progress. Needs a decision or an unblock. Open until resolved or dropped. Example: "Vendor API is down — Priya."
+- Request: an ask from one person to another that hasn't been accepted yet. States: draft, sent, acknowledged, resolved, denied. Example: "Ask legal to review the data policy."
+- Reminder: a self-nudge tied to a time/trigger, not a commitment to anyone. Example: "Remind me at 8pm to retry the deploy."
+- Shift: a direction change or scope pivot. Not a task — a signal that what the team was doing has changed. Example: "We're dropping analytics this week — focus is the demo."
+- Signal: a weak observation worth remembering but not yet actionable. Example: "Legal's been quiet for two weeks." "Three engineers independently hit the same bug."
+
+How the app works:
+
+- The user tells Lattice what's happening (voice or text via the chat). Lattice interprets, records the right primitives, and shows them in the Commitments tab.
+- The Pulse tab shows the active goal, a confidence sparkline, risk/blocker dots, the Morning Brief (what changed / at risk / needs decision), and Nudges (check-ins Lattice would send — overdue commitments, stale blockers, unrevisited assumptions).
+- The Commitments tab lists everything by type, sorted by due date. Each row has actions: Done, Resolved (blockers), Set due, Can't do (defer / plan changed / decline), Drop. Owners can be reassigned from the owner chip.
+- The Timeline tab is the log of every change_event — commitment completed, goal shifted, blocker emerged, etc.
+- The Interventions tab shows Lattice's suggested next actions.
+- Profiles: each member can fill in skills/focus/bio so Lattice can suggest the right owner when unassigned work lands.
+- Assumptions: beliefs the team is operating on. Lattice tracks whether they still hold; invalidated assumptions raise risk on tied commitments.
+- Confidence vs. progress: the % shown on commitments is Lattice's confidence the work will land — it is NOT a % done.
+
+When the user asks what a term means or how a feature works, answer from this reference in your normal voice — concrete, short, with one example.`;

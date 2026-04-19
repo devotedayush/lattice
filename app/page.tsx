@@ -1593,7 +1593,12 @@ function CommitmentsView({
       {grouped.map((g) => (
         <section className="section" key={g.type}>
           <div className="section-head">
-            <h2 className="section-title">{labelForType(g.type)}</h2>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <h2 className="section-title" style={{ margin: 0 }}>
+                {labelForType(g.type)}
+              </h2>
+              <TypeInfoButton type={g.type} />
+            </div>
             <span className="section-meta">{g.items.length}</span>
           </div>
           <div className="commitment-list">
@@ -1700,7 +1705,13 @@ function CommitmentRow({
       <div>
         <div className="commitment-title">{f.title}</div>
         <div className="commitment-meta" style={{ position: "relative" }}>
-          <span className={`commitment-type ${f.type}`}>{labelForType(f.type)}</span>
+          <span
+            className={`commitment-type ${f.type}`}
+            title={typeDescription(f.type)}
+            style={{ cursor: "help" }}
+          >
+            {labelForType(f.type)}
+          </span>
           {onReassign && canMutate && !closed ? (
             <button
               type="button"
@@ -2108,8 +2119,9 @@ function RespondPopover({
 }
 
 // Morning brief: what changed, what's at risk, what needs a decision.
-// Tell Lattice what you're good at. Collapsed chip when filled; expands to a
-// form when the user clicks edit (or when empty, nudges them to fill it in).
+// Profile is always editable — no edit toggle. Fields save on blur so the
+// user just types and moves on. Status chip next to the section title shows
+// saving / saved / error without modal drama.
 function MyProfile({
   authedFetch,
   teamId,
@@ -2131,57 +2143,126 @@ function MyProfile({
   onSaved: () => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(me?.name ?? "");
   const [skillsText, setSkillsText] = useState((me?.skills ?? []).join(", "));
   const [focus, setFocus] = useState(me?.focus ?? "");
   const [bio, setBio] = useState(me?.bio ?? "");
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
 
+  // Canonical strings used for dirty-check — avoids firing saves when blur
+  // happens on an unchanged field.
+  const canonicalName = me?.name ?? "";
+  const canonicalSkills = (me?.skills ?? []).join(", ");
+  const canonicalFocus = me?.focus ?? "";
+  const canonicalBio = me?.bio ?? "";
+
+  // Re-sync local state when the remote profile changes (e.g. after save).
   useEffect(() => {
-    setSkillsText((me?.skills ?? []).join(", "));
-    setFocus(me?.focus ?? "");
-    setBio(me?.bio ?? "");
-  }, [me?.skills, me?.focus, me?.bio]);
+    setName(canonicalName);
+  }, [canonicalName]);
+  useEffect(() => {
+    setSkillsText(canonicalSkills);
+  }, [canonicalSkills]);
+  useEffect(() => {
+    setFocus(canonicalFocus);
+  }, [canonicalFocus]);
+  useEffect(() => {
+    setBio(canonicalBio);
+  }, [canonicalBio]);
+
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+    };
+  }, []);
 
   const stats = me ? statsForMember(state, me.name) : null;
-  const hasProfile = (me?.skills?.length ?? 0) > 0 || !!me?.focus || !!me?.bio;
 
-  const save = async () => {
-    setBusy(true);
+  const persist = async (payload: {
+    name?: string;
+    skills?: string[];
+    focus?: string | null;
+    bio?: string | null;
+  }) => {
+    setStatus("saving");
     setErr(null);
     try {
-      const skills = skillsText
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const res = await authedFetch(`/api/v2/teams/${encodeURIComponent(teamId)}/members/profile`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          skills,
-          focus: focus.trim() || null,
-          bio: bio.trim() || null,
-        }),
-      });
+      const res = await authedFetch(
+        `/api/v2/teams/${encodeURIComponent(teamId)}/members/profile`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        },
+      );
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         setErr(data.error ?? "Could not save.");
+        setStatus("error");
         return;
       }
       await onSaved();
-      setEditing(false);
-    } finally {
-      setBusy(false);
+      setStatus("saved");
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+      savedTimer.current = setTimeout(() => setStatus("idle"), 1600);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not save.");
+      setStatus("error");
     }
   };
 
+  const saveNameIfDirty = () => {
+    const trimmed = name.trim();
+    if (trimmed === canonicalName) return;
+    if (!trimmed) {
+      // Refuse to save an empty name — names own commitments, empty is broken.
+      setErr("Name can't be empty.");
+      setStatus("error");
+      setName(canonicalName);
+      return;
+    }
+    void persist({ name: trimmed });
+  };
+
+  const saveSkillsIfDirty = () => {
+    if (skillsText === canonicalSkills) return;
+    const skills = skillsText
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    void persist({ skills });
+  };
+
+  const saveFocusIfDirty = () => {
+    if (focus === canonicalFocus) return;
+    void persist({ focus: focus.trim() || null });
+  };
+
+  const saveBioIfDirty = () => {
+    if (bio === canonicalBio) return;
+    void persist({ bio: bio.trim() || null });
+  };
+
   if (!me) return null;
+
+  const hasProfile = (me.skills?.length ?? 0) > 0 || !!me.focus || !!me.bio;
+
+  const statusChip =
+    status === "saving" ? (
+      <span className="small muted">saving…</span>
+    ) : status === "saved" ? (
+      <span className="small muted">saved</span>
+    ) : status === "error" && err ? (
+      <span className="small" style={{ color: "#b4451e" }}>{err}</span>
+    ) : null;
 
   return (
     <section className="section">
       <div className="section-head">
         <h2 className="section-title">Your profile</h2>
-        <div className="row" style={{ gap: 8, alignItems: "center" }}>
-          {stats && (
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          {stats && (stats.completed > 0 || stats.openCount > 0) && (
             <span className="small muted" title="Based on your history in this team">
               {stats.completed} shipped
               {stats.openCount ? ` · ${stats.openCount} open` : ""}
@@ -2191,19 +2272,16 @@ function MyProfile({
                 : ""}
             </span>
           )}
-          {!editing && (
-            <button className="btn-ghost small" onClick={() => setEditing(true)}>
-              {hasProfile ? "Edit" : "Add"}
-            </button>
-          )}
+          {statusChip}
+          <button
+            type="button"
+            className="btn-ghost small"
+            onClick={() => setEditing((v) => !v)}
+          >
+            {editing ? "Done" : hasProfile ? "Edit profile" : "Add profile"}
+          </button>
         </div>
       </div>
-
-      {!editing && !hasProfile && (
-        <div className="empty">
-          Tell Lattice what you&apos;re good at so it can suggest the right owner when work lands.
-        </div>
-      )}
 
       {!editing && hasProfile && (
         <div className="stack" style={{ gap: 6 }}>
@@ -2228,11 +2306,35 @@ function MyProfile({
       {editing && (
         <div className="stack" style={{ gap: 8 }}>
           <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">Display name (how the team sees you in commitments)</span>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={saveNameIfDirty}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              placeholder="Your name"
+              autoFocus
+            />
+          </label>
+          <label className="stack" style={{ gap: 4 }}>
             <span className="small muted">Skills (comma-separated)</span>
             <input
               type="text"
               value={skillsText}
               onChange={(e) => setSkillsText(e.target.value)}
+              onBlur={saveSkillsIfDirty}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
               placeholder="frontend, design, infra, go, customer calls"
             />
           </label>
@@ -2242,6 +2344,13 @@ function MyProfile({
               type="text"
               value={focus}
               onChange={(e) => setFocus(e.target.value)}
+              onBlur={saveFocusIfDirty}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
               placeholder="Backend services and data pipelines"
             />
           </label>
@@ -2250,35 +2359,11 @@ function MyProfile({
             <textarea
               value={bio}
               onChange={(e) => setBio(e.target.value)}
+              onBlur={saveBioIfDirty}
               placeholder="Fast on prototyping, slow on polish. Out Thursdays."
               rows={2}
             />
           </label>
-          {err && <div className="auth-error">{err}</div>}
-          <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
-            <button
-              type="button"
-              className="btn-ghost small"
-              onClick={() => {
-                setEditing(false);
-                setSkillsText((me.skills ?? []).join(", "));
-                setFocus(me.focus ?? "");
-                setBio(me.bio ?? "");
-                setErr(null);
-              }}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn-primary small"
-              onClick={() => void save()}
-              disabled={busy}
-            >
-              {busy ? "Saving…" : "Save"}
-            </button>
-          </div>
         </div>
       )}
     </section>
@@ -2613,11 +2698,11 @@ function LatticeChat({
   const chunksRef = useRef<BlobPart[]>([]);
 
   const samples = [
+    "What's a signal vs a shift?",
     "What am I forgetting?",
     "Blocked on auth — need Priya today.",
     "Who's overloaded?",
-    "Dropping analytics, focus on demo.",
-    "Give me the 7am read.",
+    "How does this app work?",
   ];
 
   useEffect(() => {
@@ -2947,6 +3032,90 @@ function labelForType(t: FieldObjectType): string {
     signal: "Signals",
   };
   return map[t];
+}
+
+function typeDescription(t: FieldObjectType): string {
+  const map: Record<FieldObjectType, string> = {
+    intent: "What the team is trying to do — a direction, not a task.",
+    promise: "A concrete thing someone agreed to deliver — has an owner, optional due date, and a confidence.",
+    blocker: "Something stopping progress. Open until resolved or dropped.",
+    request: "An ask from one person to another, not yet accepted. States: draft, sent, acknowledged, resolved, denied.",
+    reminder: "A self-nudge tied to a time or trigger. Not a commitment to anyone else.",
+    shift: "A direction change or scope pivot — a signal that what the team was doing has changed.",
+    signal: "A weak observation worth remembering but not yet actionable.",
+  };
+  return map[t];
+}
+
+function typeExample(t: FieldObjectType): string {
+  const map: Record<FieldObjectType, string> = {
+    intent: "Ship a demo people trust by Friday.",
+    promise: "Demo video — know2, due Fri, 80% confidence.",
+    blocker: "Vendor API is down — Priya.",
+    request: "Ask legal to review the data policy.",
+    reminder: "Remind me at 8pm to retry the deploy.",
+    shift: "Dropping analytics this week — focus is the demo.",
+    signal: "Legal has been quiet for two weeks.",
+  };
+  return map[t];
+}
+
+function TypeInfoButton({ type }: { type: FieldObjectType }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-label={`What is a ${labelForType(type).toLowerCase().replace(/s$/, "")}?`}
+        title="What is this?"
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: "50%",
+          border: "1px solid var(--line)",
+          background: "transparent",
+          color: "var(--muted)",
+          fontSize: 11,
+          fontStyle: "italic",
+          fontFamily: "serif",
+          lineHeight: "16px",
+          padding: 0,
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        i
+      </button>
+      {open && (
+        <div
+          onMouseLeave={() => setOpen(false)}
+          role="tooltip"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            minWidth: 260,
+            maxWidth: 340,
+            background: "var(--bg)",
+            border: "1px solid var(--line)",
+            borderRadius: 10,
+            padding: 10,
+            zIndex: 20,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+            lineHeight: 1.45,
+          }}
+        >
+          <div style={{ fontSize: 13 }}>{typeDescription(type)}</div>
+          <div className="small muted" style={{ marginTop: 6, fontStyle: "italic" }}>
+            e.g. “{typeExample(type)}”
+          </div>
+        </div>
+      )}
+    </span>
+  );
 }
 
 // ----------------------------------------------------------------------
