@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "mcp__supabase__list_tables",
-      "mcp__supabase__execute_sql"
+      "mcp__supabase__execute_sql",
+      "Bash(rm /Volumes/SSD/code/hack1/orgmind/.git/index.lock)",
+      "Bash(git add *)"
     ]
   }
 }

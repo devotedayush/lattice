@@ -58,6 +58,8 @@ export async function PATCH(request: Request) {
     if (!existing) return NextResponse.json({ error: "Not found." }, { status: 404 });
 
     const OWNER_GATED: Action[] = [
+      "complete",
+      "resolve",
       "drop",
       "set_owner",
       "set_due",

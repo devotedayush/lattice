@@ -1849,12 +1849,12 @@ function CommitmentRow({
         <div className="conf-bar" title="Confidence, not progress">
           <div className={`fill ${confClass}`} style={{ width: `${f.confidence * 100}%` }} />
         </div>
-        {!closed && (f.type === "promise" || f.type === "request") && (
+        {!closed && canMutate && (f.type === "promise" || f.type === "request") && (
           <button className="btn-ghost small" disabled={busy} onClick={() => click("complete")}>
             Done
           </button>
         )}
-        {!closed && f.type === "blocker" && (
+        {!closed && canMutate && f.type === "blocker" && (
           <button className="btn-ghost small" disabled={busy} onClick={() => click("resolve")}>
             Resolved
           </button>
