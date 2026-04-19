@@ -152,6 +152,7 @@ export type InterpretationEntityV2 = {
   why?: string;
   linkedTo?: string;
   confidence?: number;
+  dueAt?: string;
 };
 
 export type DetectedChangeEvent = {

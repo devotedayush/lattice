@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
 import { interpretV2 } from "@/lib/ai-v2";
-import { getUserActiveTeam } from "@/lib/teams";
+import { getUserActiveTeam, listTeamMembers } from "@/lib/teams";
 import { applyInterpretationV2ToDatabase, fetchLatticeState } from "@/lib/v2-db";
 
 export async function POST(request: Request) {
@@ -27,8 +27,11 @@ export async function POST(request: Request) {
     const team = await getUserActiveTeam(auth.supabase, auth.user.id, body.teamId ?? null);
     if (!team) return NextResponse.json({ error: "No team — create one first." }, { status: 400 });
 
-    const currentState = await fetchLatticeState(auth.supabase, team.id);
-    const interpretation = await interpretV2(input, currentState);
+    const [currentState, members] = await Promise.all([
+      fetchLatticeState(auth.supabase, team.id),
+      listTeamMembers(auth.supabase, team.id).catch(() => []),
+    ]);
+    const interpretation = await interpretV2(input, currentState, members);
 
     if (!body.apply) {
       return NextResponse.json({ interpretation, state: currentState, team });

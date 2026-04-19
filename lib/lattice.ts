@@ -21,6 +21,9 @@ export type FieldObject = {
   y: number;
   pulse: "quiet" | "active" | "tense" | "stale" | "clear";
   links?: string[];
+  dueAt?: string;
+  deferredUntil?: string;
+  declineReason?: string;
 };
 
 export type MemoryEvent = {
@@ -55,6 +58,8 @@ export type InterpretationEntity = {
   target?: string;
   why?: string;
   linkedTo?: string;
+  confidence?: number;
+  dueAt?: string; // ISO
 };
 
 export type Interpretation = {
@@ -321,7 +326,7 @@ export function applyInterpretation(state: TeamState, interpretation: Interpreta
 export function labelFor(type: FieldObjectType) {
   const labels: Record<FieldObjectType, string> = {
     intent: "Intent",
-    promise: "Promise",
+    promise: "Commitment",
     blocker: "Blocker",
     shift: "Shift",
     request: "Request",
@@ -341,11 +346,15 @@ function toFieldObject(entity: InterpretationEntity, offset: number): FieldObjec
     detail: entity.detail,
     owner: entity.owner ?? (entity.type === "request" ? "Lattice" : undefined),
     status: entity.trigger ?? entity.target ?? "new",
-    confidence: entity.type === "blocker" ? 0.46 : 0.72,
+    confidence:
+      typeof entity.confidence === "number"
+        ? Math.max(0, Math.min(1, entity.confidence))
+        : 0.7,
     x: 22 + ((ring * 17) % 60),
     y: 24 + ((ring * 23) % 54),
     pulse: typePulse[entity.type],
     links: [],
+    dueAt: entity.dueAt,
   };
 }
 

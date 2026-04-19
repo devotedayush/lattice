@@ -28,6 +28,7 @@ import {
   type LatticeState,
 } from "@/lib/v2";
 import type { FieldObject, FieldObjectType } from "@/lib/lattice";
+import { statsForMember } from "@/lib/member-stats";
 
 type Tab = "pulse" | "timeline" | "interventions" | "commitments";
 
@@ -36,6 +37,7 @@ type TeamSummary = {
   name: string;
   role: "owner" | "admin" | "member";
   createdAt: string;
+  memberName?: string;
 };
 
 type AuthedFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -53,12 +55,24 @@ export default function Page() {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [state, setState] = useState<LatticeState>(emptyLatticeState);
   const [tab, setTab] = useState<Tab>("pulse");
-  const [composerOpen, setComposerOpen] = useState(false);
+  const [orbKick, setOrbKick] = useState(0);
+  const [chatPrefill, setChatPrefill] = useState<{ text: string; at: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [activeTeam, setActiveTeam] = useState<TeamSummary | null>(null);
   const [needsTeam, setNeedsTeam] = useState(false);
   const [teamPanel, setTeamPanel] = useState<"none" | "create" | "manage">("none");
+  const [members, setMembers] = useState<
+    {
+      id: string;
+      name: string;
+      role: string;
+      email?: string | null;
+      skills?: string[];
+      focus?: string | null;
+      bio?: string | null;
+    }[]
+  >([]);
   const [simulating, setSimulating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [seeding, setSeeding] = useState(false);
@@ -105,7 +119,14 @@ export default function Page() {
       if (!session) throw new Error("Sign in required.");
       const headers = new Headers(init.headers);
       headers.set("Authorization", `Bearer ${session.access_token}`);
-      if (init.body && !headers.has("Content-Type")) {
+      // Only default JSON for body types that aren't already structured (FormData,
+      // Blob, URLSearchParams set their own Content-Type / multipart boundary).
+      const body = init.body;
+      const isStructured =
+        typeof FormData !== "undefined" && body instanceof FormData ||
+        typeof Blob !== "undefined" && body instanceof Blob ||
+        typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams;
+      if (body && !headers.has("Content-Type") && !isStructured) {
         headers.set("Content-Type", "application/json");
       }
       return fetch(input, { ...init, headers });
@@ -154,6 +175,32 @@ export default function Page() {
   useEffect(() => {
     if (session && activeTeam) void loadState(activeTeam.id);
   }, [session, activeTeam, loadState]);
+
+  // Load members for the active team so we can power the reassign dropdown.
+  useEffect(() => {
+    if (!session || !activeTeam) {
+      setMembers([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authedFetch(
+          `/api/v2/teams/${encodeURIComponent(activeTeam.id)}/members`,
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          members?: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
+        };
+        if (!cancelled) setMembers(data.members ?? []);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session, activeTeam, authedFetch]);
 
   // Supabase realtime: refresh state when anything in this team changes
   useEffect(() => {
@@ -293,7 +340,7 @@ export default function Page() {
       {tab === "pulse" && (
         <PulseView
           state={state}
-          onOpenComposer={() => setComposerOpen(true)}
+          onOpenComposer={() => setOrbKick((k) => k + 1)}
           authedFetch={authedFetch}
           teamId={teamId}
           onState={setState}
@@ -302,6 +349,22 @@ export default function Page() {
           simulating={simulating}
           analyzing={analyzing}
           updatedIds={updatedIds}
+          orbKick={orbKick}
+          chatPrefill={chatPrefill}
+          onChatPrefill={(text) => setChatPrefill({ text, at: Date.now() })}
+          activeTeam={activeTeam}
+          members={members}
+          onMembersChanged={async () => {
+            if (!activeTeam) return;
+            const res = await authedFetch(
+              `/api/v2/teams/${encodeURIComponent(activeTeam.id)}/members`,
+            );
+            if (!res.ok) return;
+            const data = (await res.json()) as {
+              members?: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
+            };
+            setMembers(data.members ?? []);
+          }}
         />
       )}
       {tab === "timeline" && <TimelineView state={state} updatedIds={updatedIds} />}
@@ -315,22 +378,23 @@ export default function Page() {
         />
       )}
       {tab === "commitments" && (
-        <CommitmentsView state={state} authedFetch={authedFetch} teamId={teamId} onState={setState} updatedIds={updatedIds} />
-      )}
-
-      <VoiceDock onClick={() => setComposerOpen(true)} />
-
-      {composerOpen && (
-        <ComposerSheet
-          onClose={() => setComposerOpen(false)}
+        <CommitmentsView
+          state={state}
           authedFetch={authedFetch}
           teamId={teamId}
-          onApplied={(next) => {
-            setState(next);
-            setComposerOpen(false);
-          }}
+          onState={setState}
+          updatedIds={updatedIds}
+          activeTeam={activeTeam}
+          members={members}
         />
       )}
+
+      <VoiceDock
+        onClick={() => {
+          if (tab !== "pulse") setTab("pulse");
+          setOrbKick((k) => k + 1);
+        }}
+      />
 
       {teamPanel === "create" && (
         <CreateTeamModal
@@ -348,6 +412,7 @@ export default function Page() {
         <ManageTeamModal
           authedFetch={authedFetch}
           team={activeTeam}
+          state={state}
           onClose={() => setTeamPanel("none")}
         />
       )}
@@ -656,6 +721,9 @@ type MemberRow = {
   name: string | null;
   email: string | null;
   joinedAt: string;
+  skills?: string[];
+  focus?: string | null;
+  bio?: string | null;
 };
 
 type InviteRow = {
@@ -671,10 +739,12 @@ type InviteRow = {
 function ManageTeamModal({
   authedFetch,
   team,
+  state,
   onClose,
 }: {
   authedFetch: AuthedFetch;
   team: TeamSummary;
+  state: LatticeState;
   onClose: () => void;
 }) {
   const [members, setMembers] = useState<MemberRow[]>([]);
@@ -759,33 +829,73 @@ function ManageTeamModal({
         <div className="sheet-body">
           <h4>Members</h4>
           <div className="stack" style={{ gap: 8 }}>
-            {members.map((m) => (
-              <div key={m.userId} className="commitment" style={{ gridTemplateColumns: "1fr auto" }}>
-                <div>
-                  <div className="commitment-title">{m.name || m.email || m.userId}</div>
-                  <div className="commitment-meta">
-                    <span>{m.email}</span>
-                    <span>· {m.role}</span>
+            {members.map((m) => {
+              const stats = m.name ? statsForMember(state, m.name) : null;
+              return (
+                <div
+                  key={m.userId}
+                  className="commitment"
+                  style={{ gridTemplateColumns: "1fr auto" }}
+                >
+                  <div>
+                    <div className="commitment-title">{m.name || m.email || m.userId}</div>
+                    <div className="commitment-meta">
+                      <span>{m.email}</span>
+                      <span>· {m.role}</span>
+                    </div>
+                    {(m.skills?.length || m.focus) && (
+                      <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                        {(m.skills ?? []).slice(0, 6).map((s) => (
+                          <span
+                            key={s}
+                            className="sample-chip"
+                            style={{ cursor: "default", fontSize: 11 }}
+                          >
+                            {s}
+                          </span>
+                        ))}
+                        {m.focus && (
+                          <span className="small muted" style={{ alignSelf: "center" }}>
+                            {m.focus}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {stats && (stats.completed > 0 || stats.openCount > 0) && (
+                      <div className="small muted" style={{ marginTop: 2 }}>
+                        {stats.completed} shipped
+                        {stats.openCount ? ` · ${stats.openCount} open` : ""}
+                        {stats.overdueCount ? ` · ${stats.overdueCount} overdue` : ""}
+                        {stats.onTimeRate !== null
+                          ? ` · ${Math.round(stats.onTimeRate * 100)}% on-time`
+                          : ""}
+                        {stats.avgDeliveryHours !== null
+                          ? ` · ~${stats.avgDeliveryHours}h avg`
+                          : ""}
+                      </div>
+                    )}
                   </div>
+                  {canAdmin && (
+                    <div className="row" style={{ gap: 6 }}>
+                      <select
+                        value={m.role}
+                        onChange={(e) =>
+                          changeRole(m.userId, e.target.value as "owner" | "admin" | "member")
+                        }
+                        disabled={team.role !== "owner" && m.role === "owner"}
+                      >
+                        <option value="owner">owner</option>
+                        <option value="admin">admin</option>
+                        <option value="member">member</option>
+                      </select>
+                      <button className="btn-ghost small" onClick={() => removeMember(m.userId)}>
+                        Remove
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {canAdmin && (
-                  <div className="row" style={{ gap: 6 }}>
-                    <select
-                      value={m.role}
-                      onChange={(e) => changeRole(m.userId, e.target.value as "owner" | "admin" | "member")}
-                      disabled={team.role !== "owner" && m.role === "owner"}
-                    >
-                      <option value="owner">owner</option>
-                      <option value="admin">admin</option>
-                      <option value="member">member</option>
-                    </select>
-                    <button className="btn-ghost small" onClick={() => removeMember(m.userId)}>
-                      Remove
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {canAdmin && (
@@ -898,6 +1008,12 @@ function PulseView({
   simulating,
   analyzing,
   updatedIds,
+  orbKick,
+  chatPrefill,
+  onChatPrefill,
+  activeTeam,
+  members,
+  onMembersChanged,
 }: {
   state: LatticeState;
   onOpenComposer: () => void;
@@ -909,7 +1025,18 @@ function PulseView({
   simulating: boolean;
   analyzing: boolean;
   updatedIds: Set<string>;
+  orbKick: number;
+  chatPrefill: { text: string; at: number } | null;
+  onChatPrefill: (text: string) => void;
+  activeTeam: TeamSummary | null;
+  members: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
+  onMembersChanged: () => Promise<void>;
 }) {
+  const myMember = activeTeam
+    ? members.find(
+        (m) => m.name.trim().toLowerCase() === activeTeam.memberName?.trim().toLowerCase(),
+      )
+    : undefined;
   const activeGoal = state.goals.find((g) => g.state === "active");
   const conf = teamConfidence(state);
   const atRisk = atRiskCount(state);
@@ -970,40 +1097,32 @@ function PulseView({
               {activeGoal ? "Edit goal" : "Set goal"}
             </button>
           )}
-          <button className="btn-ghost" onClick={onAnalyze} disabled={analyzing}>
-            {analyzing ? "Analyzing…" : "Run analysis"}
-          </button>
-          <button className="btn-ghost" onClick={onSimulate} disabled={simulating}>
-            {simulating ? "…" : "Simulate teammate"}
-          </button>
         </div>
       </div>
 
-      <div className="meta-strip">
-        <div className="meta-card">
-          <div className="meta-label">Confidence</div>
-          <div className={`meta-value ${conf < 0.5 ? "warn" : "accent"}`}>
-            {Math.round(conf * 100)}%
-          </div>
-          <div className="meta-sub">How likely we hit the goal right now</div>
-        </div>
-        <div className="meta-card">
-          <div className="meta-label">At risk</div>
-          <div className={`meta-value ${atRisk > 0 ? "warn" : ""}`}>{atRisk}</div>
-          <div className="meta-sub">
-            {atRisk === 0 ? "Nothing on fire" : "Commitments below 50% or blocked"}
-          </div>
-        </div>
-        <div className="meta-card">
-          <div className="meta-label">Blockers</div>
-          <div className={`meta-value ${openBlockers > 0 ? "warn" : ""}`}>{openBlockers}</div>
-          <div className="meta-sub">
-            {openBlockers === 0 ? "Clear" : "Open, needs attention"}
-          </div>
-        </div>
-      </div>
+      <StatusBar conf={conf} atRisk={atRisk} openBlockers={openBlockers} />
 
-      <AskLattice authedFetch={authedFetch} teamId={teamId} />
+      {teamId && (
+        <MyProfile
+          authedFetch={authedFetch}
+          teamId={teamId}
+          me={myMember}
+          state={state}
+          onSaved={onMembersChanged}
+        />
+      )}
+
+      <MorningBrief authedFetch={authedFetch} teamId={teamId} />
+
+      <Nudges authedFetch={authedFetch} teamId={teamId} onReply={onChatPrefill} />
+
+      <LatticeChat
+        authedFetch={authedFetch}
+        teamId={teamId}
+        onState={onState}
+        orbKick={orbKick}
+        prefill={chatPrefill}
+      />
 
       <section className="section">
         <div className="section-head">
@@ -1365,13 +1484,36 @@ function CommitmentsView({
   teamId,
   onState,
   updatedIds,
+  activeTeam,
+  members,
 }: {
   state: LatticeState;
   authedFetch: AuthedFetch;
   teamId: string | undefined;
   onState: (s: LatticeState) => void;
   updatedIds: Set<string>;
+  activeTeam: TeamSummary | null;
+  members: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
 }) {
+  const canMutate = (f: FieldObject): boolean => {
+    if (!activeTeam) return false;
+    if (activeTeam.role === "owner" || activeTeam.role === "admin") return true;
+    if (!f.owner || !activeTeam.memberName) return false;
+    return f.owner.trim().toLowerCase() === activeTeam.memberName.trim().toLowerCase();
+  };
+  const reassign = async (id: string, owner: string | null) => {
+    const res = await authedFetch("/api/v2/commitment", {
+      method: "PATCH",
+      body: JSON.stringify({ id, action: "set_owner", owner, teamId }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { state: LatticeState };
+      if (data.state) onState(data.state);
+    } else {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      alert(data.error ?? "Reassign failed.");
+    }
+  };
   const act = async (id: string, action: "complete" | "resolve" | "drop") => {
     const res = await authedFetch("/api/v2/commitment", {
       method: "PATCH",
@@ -1382,12 +1524,56 @@ function CommitmentsView({
       if (data.state) onState(data.state);
     }
   };
+  const setDue = async (id: string, dueAt: string | null) => {
+    const res = await authedFetch("/api/v2/commitment", {
+      method: "PATCH",
+      body: JSON.stringify({ id, action: "set_due", dueAt, teamId }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { state: LatticeState };
+      if (data.state) onState(data.state);
+    }
+  };
+  const respond = async (
+    id: string,
+    mode: "decline" | "defer" | "scope_change",
+    reason: string,
+    deferredUntil?: string | null,
+  ) => {
+    const res = await authedFetch("/api/v2/commitment", {
+      method: "PATCH",
+      body: JSON.stringify({
+        id,
+        action: mode,
+        reason,
+        deferredUntil: deferredUntil ?? null,
+        teamId,
+      }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { state: LatticeState };
+      if (data.state) onState(data.state);
+    } else {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      alert(data.error ?? "Update failed.");
+    }
+  };
   const grouped = useMemo(() => {
     const order: FieldObjectType[] = ["promise", "blocker", "request", "reminder", "shift", "signal"];
     const byType = new Map<FieldObjectType, FieldObject[]>();
     for (const f of state.fieldObjects) {
       if (!byType.has(f.type)) byType.set(f.type, []);
       byType.get(f.type)!.push(f);
+    }
+    // Sort promises/blockers by urgency: overdue first, then soonest due, then undated last.
+    const urgencyScore = (f: FieldObject): number => {
+      if (f.status === "done" || f.status === "dropped" || f.status === "resolved") return 1e15;
+      if (!f.dueAt) return 1e14;
+      const t = Date.parse(f.dueAt);
+      return Number.isFinite(t) ? t : 1e14;
+    };
+    for (const [, items] of byType) {
+      items.sort((a, b) => urgencyScore(a) - urgencyScore(b));
     }
     return order
       .map((t) => ({ type: t, items: byType.get(t) ?? [] }))
@@ -1412,7 +1598,17 @@ function CommitmentsView({
           </div>
           <div className="commitment-list">
             {g.items.map((f) => (
-              <CommitmentRow key={f.id} f={f} onAct={act} flash={updatedIds.has(f.id)} />
+              <CommitmentRow
+                key={f.id}
+                f={f}
+                onAct={act}
+                onReassign={reassign}
+                onSetDue={setDue}
+                onRespond={respond}
+                flash={updatedIds.has(f.id)}
+                canMutate={canMutate(f)}
+                members={members}
+              />
             ))}
           </div>
         </section>
@@ -1448,15 +1644,39 @@ function CommitmentsView({
 function CommitmentRow({
   f,
   onAct,
+  onReassign,
+  onSetDue,
+  onRespond,
   flash,
+  canMutate = true,
+  members = [],
 }: {
   f: FieldObject;
   onAct: (id: string, action: "complete" | "resolve" | "drop") => Promise<void>;
+  onReassign?: (id: string, owner: string | null) => Promise<void>;
+  onSetDue?: (id: string, dueAt: string | null) => Promise<void>;
+  onRespond?: (
+    id: string,
+    mode: "decline" | "defer" | "scope_change",
+    reason: string,
+    deferredUntil?: string | null,
+  ) => Promise<void>;
   flash?: boolean;
+  canMutate?: boolean;
+  members?: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
 }) {
   const confClass = f.confidence < 0.4 ? "low" : f.confidence < 0.7 ? "mid" : "";
   const [busy, setBusy] = useState(false);
+  const [ownerOpen, setOwnerOpen] = useState(false);
+  const [respondOpen, setRespondOpen] = useState(false);
+  const [dueOpen, setDueOpen] = useState(false);
   const closed = f.status === "done" || f.status === "resolved" || f.status === "dropped";
+  const dueMeta = fmtDueMeta(f.dueAt);
+  const deferredActive = (() => {
+    if (!f.deferredUntil) return null;
+    const t = Date.parse(f.deferredUntil);
+    return Number.isFinite(t) && t > Date.now() ? new Date(t) : null;
+  })();
   const click = async (action: "complete" | "resolve" | "drop") => {
     setBusy(true);
     try {
@@ -1465,19 +1685,157 @@ function CommitmentRow({
       setBusy(false);
     }
   };
+  const pickOwner = async (name: string | null) => {
+    if (!onReassign) return;
+    setOwnerOpen(false);
+    setBusy(true);
+    try {
+      await onReassign(f.id, name);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className={`commitment${flash ? " just-updated" : ""}`} style={closed ? { opacity: 0.55 } : undefined}>
       <div>
         <div className="commitment-title">{f.title}</div>
-        <div className="commitment-meta">
+        <div className="commitment-meta" style={{ position: "relative" }}>
           <span className={`commitment-type ${f.type}`}>{labelForType(f.type)}</span>
-          {f.owner && <span>{f.owner}</span>}
+          {onReassign && canMutate && !closed ? (
+            <button
+              type="button"
+              className="btn-ghost small"
+              onClick={() => setOwnerOpen((o) => !o)}
+              disabled={busy}
+              style={{
+                padding: "0 6px",
+                borderRadius: 6,
+                fontSize: "inherit",
+                color: f.owner ? undefined : "var(--muted)",
+              }}
+              title="Reassign"
+            >
+              {f.owner ?? "unassigned"} ▾
+            </button>
+          ) : (
+            f.owner && <span>{f.owner}</span>
+          )}
           {f.status && <span>· {f.status}</span>}
+          {dueMeta && (
+            <span
+              className={dueMeta.late ? "warn" : undefined}
+              title={f.dueAt ? new Date(f.dueAt).toLocaleString() : undefined}
+            >
+              · {dueMeta.label}
+            </span>
+          )}
+          {deferredActive && (
+            <span className="muted" title={f.declineReason ?? undefined}>
+              · deferred until {deferredActive.toLocaleDateString()}
+            </span>
+          )}
+          {f.declineReason && !deferredActive && f.status === "dropped" && (
+            <span className="muted" title={f.declineReason}>
+              · declined
+            </span>
+          )}
+          {ownerOpen && (
+            <div
+              onMouseLeave={() => setOwnerOpen(false)}
+              style={{
+                position: "absolute",
+                top: "100%",
+                left: 60,
+                marginTop: 4,
+                background: "var(--bg)",
+                border: "1px solid var(--line)",
+                borderRadius: 10,
+                padding: 4,
+                minWidth: 180,
+                zIndex: 30,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+              }}
+            >
+              {members.length === 0 && (
+                <div
+                  className="small muted"
+                  style={{ padding: "6px 10px" }}
+                >
+                  No team members loaded.
+                </div>
+              )}
+              {members.map((m) => {
+                const isCurrent =
+                  f.owner?.trim().toLowerCase() === m.name.trim().toLowerCase();
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="btn-ghost small"
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      width: "100%",
+                      padding: "6px 10px",
+                      background: isCurrent ? "var(--line-soft, #f5f4f1)" : "transparent",
+                      textAlign: "left",
+                      gap: 10,
+                    }}
+                    disabled={isCurrent}
+                    onClick={() => void pickOwner(m.name)}
+                    title={m.email ?? undefined}
+                  >
+                    <span
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-start",
+                        minWidth: 0,
+                      }}
+                    >
+                      <span>{m.name}</span>
+                      {m.email && (
+                        <span
+                          className="muted small"
+                          style={{
+                            fontSize: 11,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            maxWidth: 200,
+                          }}
+                        >
+                          {m.email}
+                        </span>
+                      )}
+                    </span>
+                    <span className="muted small">{m.role}</span>
+                  </button>
+                );
+              })}
+              {f.owner && (
+                <>
+                  <div style={{ borderTop: "1px solid var(--line)", margin: "4px 0" }} />
+                  <button
+                    type="button"
+                    className="btn-ghost small"
+                    style={{ width: "100%", textAlign: "left", padding: "6px 10px" }}
+                    onClick={() => void pickOwner(null)}
+                  >
+                    Unassign
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <div className="row" style={{ gap: 8 }}>
-        <div className="small muted">{Math.round(f.confidence * 100)}%</div>
-        <div className="conf-bar">
+        <div className="small muted" title="Lattice's confidence this commitment will land">
+          {Math.round(f.confidence * 100)}% conf
+        </div>
+        <div className="conf-bar" title="Confidence, not progress">
           <div className={`fill ${confClass}`} style={{ width: `${f.confidence * 100}%` }} />
         </div>
         {!closed && (f.type === "promise" || f.type === "request") && (
@@ -1490,7 +1848,60 @@ function CommitmentRow({
             Resolved
           </button>
         )}
-        {!closed && (
+        {!closed && canMutate && onSetDue && (
+          <div style={{ position: "relative" }}>
+            <button
+              className="btn-ghost small"
+              disabled={busy}
+              onClick={() => setDueOpen((o) => !o)}
+              title="Set or clear the due date"
+            >
+              {f.dueAt ? "Due…" : "Set due"}
+            </button>
+            {dueOpen && (
+              <DuePicker
+                current={f.dueAt}
+                onPick={async (iso) => {
+                  setDueOpen(false);
+                  setBusy(true);
+                  try {
+                    await onSetDue(f.id, iso);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                onClose={() => setDueOpen(false)}
+              />
+            )}
+          </div>
+        )}
+        {!closed && canMutate && onRespond && (f.type === "promise" || f.type === "request") && (
+          <div style={{ position: "relative" }}>
+            <button
+              className="btn-ghost small"
+              disabled={busy}
+              onClick={() => setRespondOpen((o) => !o)}
+              title="Respond: can't do it, plan changed, or defer"
+            >
+              Can&apos;t do
+            </button>
+            {respondOpen && (
+              <RespondPopover
+                onClose={() => setRespondOpen(false)}
+                onSubmit={async (mode, reason, until) => {
+                  setRespondOpen(false);
+                  setBusy(true);
+                  try {
+                    await onRespond(f.id, mode, reason, until ?? null);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              />
+            )}
+          </div>
+        )}
+        {!closed && canMutate && (
           <button className="btn-ghost small" disabled={busy} onClick={() => click("drop")}>
             Drop
           </button>
@@ -1500,84 +1911,978 @@ function CommitmentRow({
   );
 }
 
-// Inline question-answering: ask Lattice anything about the team.
-function AskLattice({
+function fmtDueMeta(dueAt?: string): { label: string; late: boolean } | null {
+  if (!dueAt) return null;
+  const t = Date.parse(dueAt);
+  if (!Number.isFinite(t)) return null;
+  const diffMs = t - Date.now();
+  const diffH = diffMs / 36e5;
+  if (diffH < -1) {
+    const d = Math.round(-diffH / 24);
+    return { label: d >= 1 ? `${d}d late` : `${Math.round(-diffH)}h late`, late: true };
+  }
+  if (diffH < 24) {
+    if (diffH < 1) return { label: "due soon", late: false };
+    return { label: `due in ${Math.round(diffH)}h`, late: diffH < 6 };
+  }
+  const days = Math.round(diffH / 24);
+  return { label: `due in ${days}d`, late: false };
+}
+
+function DuePicker({
+  current,
+  onPick,
+  onClose,
+}: {
+  current?: string;
+  onPick: (iso: string | null) => void;
+  onClose: () => void;
+}) {
+  const defaultDate = current
+    ? new Date(current).toISOString().slice(0, 10)
+    : new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  const [date, setDate] = useState(defaultDate);
+  const quick = [
+    { label: "Today", days: 0 },
+    { label: "Tomorrow", days: 1 },
+    { label: "Friday", days: (5 - new Date().getDay() + 7) % 7 || 7 },
+    { label: "Next week", days: 7 },
+  ];
+  const apply = () => {
+    const [y, m, d] = date.split("-").map(Number);
+    const iso = new Date(Date.UTC(y, m - 1, d, 23, 59)).toISOString();
+    onPick(iso);
+  };
+  return (
+    <div
+      onMouseLeave={onClose}
+      style={{
+        position: "absolute",
+        top: "100%",
+        right: 0,
+        marginTop: 4,
+        background: "var(--bg)",
+        border: "1px solid var(--line)",
+        borderRadius: 10,
+        padding: 10,
+        zIndex: 30,
+        minWidth: 220,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+      }}
+    >
+      <div className="small muted" style={{ marginBottom: 6 }}>
+        Due date
+      </div>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        {quick.map((q) => (
+          <button
+            key={q.label}
+            type="button"
+            className="sample-chip"
+            onClick={() => {
+              const iso = new Date(
+                Date.now() + q.days * 86_400_000,
+              );
+              iso.setHours(23, 59, 0, 0);
+              onPick(iso.toISOString());
+            }}
+          >
+            {q.label}
+          </button>
+        ))}
+      </div>
+      <input
+        type="date"
+        value={date}
+        onChange={(e) => setDate(e.target.value)}
+        style={{ width: "100%" }}
+      />
+      <div className="row" style={{ gap: 6, marginTop: 8, justifyContent: "flex-end" }}>
+        {current && (
+          <button type="button" className="btn-ghost small" onClick={() => onPick(null)}>
+            Clear
+          </button>
+        )}
+        <button type="button" className="btn-primary small" onClick={apply}>
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RespondPopover({
+  onClose,
+  onSubmit,
+}: {
+  onClose: () => void;
+  onSubmit: (
+    mode: "decline" | "defer" | "scope_change",
+    reason: string,
+    until?: string,
+  ) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"decline" | "defer" | "scope_change">("defer");
+  const [reason, setReason] = useState("");
+  const [until, setUntil] = useState(
+    new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10),
+  );
+  const submit = async () => {
+    if (mode === "defer") {
+      const [y, m, d] = until.split("-").map(Number);
+      const iso = new Date(Date.UTC(y, m - 1, d, 23, 59)).toISOString();
+      await onSubmit("defer", reason, iso);
+    } else {
+      await onSubmit(mode, reason);
+    }
+  };
+  return (
+    <div
+      onMouseLeave={onClose}
+      style={{
+        position: "absolute",
+        top: "100%",
+        right: 0,
+        marginTop: 4,
+        background: "var(--bg)",
+        border: "1px solid var(--line)",
+        borderRadius: 10,
+        padding: 12,
+        zIndex: 30,
+        minWidth: 280,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
+      }}
+    >
+      <div className="stack" style={{ gap: 8 }}>
+        <label className="row" style={{ gap: 6, alignItems: "center" }}>
+          <input
+            type="radio"
+            name="respond-mode"
+            checked={mode === "defer"}
+            onChange={() => setMode("defer")}
+          />
+          <span>Busy — defer until</span>
+          <input
+            type="date"
+            value={until}
+            onChange={(e) => setUntil(e.target.value)}
+            disabled={mode !== "defer"}
+            style={{ flex: 1, marginLeft: 4 }}
+          />
+        </label>
+        <label className="row" style={{ gap: 6, alignItems: "center" }}>
+          <input
+            type="radio"
+            name="respond-mode"
+            checked={mode === "scope_change"}
+            onChange={() => setMode("scope_change")}
+          />
+          <span>Plan changed</span>
+        </label>
+        <label className="row" style={{ gap: 6, alignItems: "center" }}>
+          <input
+            type="radio"
+            name="respond-mode"
+            checked={mode === "decline"}
+            onChange={() => setMode("decline")}
+          />
+          <span>Can&apos;t do it at all</span>
+        </label>
+        <textarea
+          placeholder="Reason (optional — helps the team understand)"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          rows={2}
+        />
+        <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+          <button type="button" className="btn-ghost small" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary small" onClick={submit}>
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Morning brief: what changed, what's at risk, what needs a decision.
+// Tell Lattice what you're good at. Collapsed chip when filled; expands to a
+// form when the user clicks edit (or when empty, nudges them to fill it in).
+function MyProfile({
+  authedFetch,
+  teamId,
+  me,
+  state,
+  onSaved,
+}: {
+  authedFetch: AuthedFetch;
+  teamId: string;
+  me?: {
+    id: string;
+    name: string;
+    role: string;
+    skills?: string[];
+    focus?: string | null;
+    bio?: string | null;
+  };
+  state: LatticeState;
+  onSaved: () => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [skillsText, setSkillsText] = useState((me?.skills ?? []).join(", "));
+  const [focus, setFocus] = useState(me?.focus ?? "");
+  const [bio, setBio] = useState(me?.bio ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSkillsText((me?.skills ?? []).join(", "));
+    setFocus(me?.focus ?? "");
+    setBio(me?.bio ?? "");
+  }, [me?.skills, me?.focus, me?.bio]);
+
+  const stats = me ? statsForMember(state, me.name) : null;
+  const hasProfile = (me?.skills?.length ?? 0) > 0 || !!me?.focus || !!me?.bio;
+
+  const save = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const skills = skillsText
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const res = await authedFetch(`/api/v2/teams/${encodeURIComponent(teamId)}/members/profile`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          skills,
+          focus: focus.trim() || null,
+          bio: bio.trim() || null,
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setErr(data.error ?? "Could not save.");
+        return;
+      }
+      await onSaved();
+      setEditing(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!me) return null;
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2 className="section-title">Your profile</h2>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {stats && (
+            <span className="small muted" title="Based on your history in this team">
+              {stats.completed} shipped
+              {stats.openCount ? ` · ${stats.openCount} open` : ""}
+              {stats.overdueCount ? ` · ${stats.overdueCount} overdue` : ""}
+              {stats.onTimeRate !== null
+                ? ` · ${Math.round(stats.onTimeRate * 100)}% on-time`
+                : ""}
+            </span>
+          )}
+          {!editing && (
+            <button className="btn-ghost small" onClick={() => setEditing(true)}>
+              {hasProfile ? "Edit" : "Add"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!editing && !hasProfile && (
+        <div className="empty">
+          Tell Lattice what you&apos;re good at so it can suggest the right owner when work lands.
+        </div>
+      )}
+
+      {!editing && hasProfile && (
+        <div className="stack" style={{ gap: 6 }}>
+          {(me.skills?.length ?? 0) > 0 && (
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {me.skills!.map((s) => (
+                <span key={s} className="sample-chip" style={{ cursor: "default" }}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
+          {me.focus && (
+            <div className="small muted">
+              <strong style={{ color: "var(--ink, inherit)" }}>Focus:</strong> {me.focus}
+            </div>
+          )}
+          {me.bio && <div className="small muted">{me.bio}</div>}
+        </div>
+      )}
+
+      {editing && (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">Skills (comma-separated)</span>
+            <input
+              type="text"
+              value={skillsText}
+              onChange={(e) => setSkillsText(e.target.value)}
+              placeholder="frontend, design, infra, go, customer calls"
+            />
+          </label>
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">Focus — the kind of work you usually take</span>
+            <input
+              type="text"
+              value={focus}
+              onChange={(e) => setFocus(e.target.value)}
+              placeholder="Backend services and data pipelines"
+            />
+          </label>
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">Notes (optional)</span>
+            <textarea
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              placeholder="Fast on prototyping, slow on polish. Out Thursdays."
+              rows={2}
+            />
+          </label>
+          {err && <div className="auth-error">{err}</div>}
+          <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              className="btn-ghost small"
+              onClick={() => {
+                setEditing(false);
+                setSkillsText((me.skills ?? []).join(", "));
+                setFocus(me.focus ?? "");
+                setBio(me.bio ?? "");
+                setErr(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-primary small"
+              onClick={() => void save()}
+              disabled={busy}
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Compact risk strip — just the two dots. Confidence lives in the sparkline
+// above, so we don't double-render it here.
+function StatusBar({
+  atRisk,
+  openBlockers,
+}: {
+  conf: number;
+  atRisk: number;
+  openBlockers: number;
+}) {
+  const qualitative =
+    atRisk === 0 && openBlockers === 0
+      ? "all clear"
+      : openBlockers > 0
+      ? "needs attention"
+      : "watching";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 18,
+        margin: "6px 0 18px",
+        padding: "0 2px",
+        fontSize: 13,
+        flexWrap: "wrap",
+      }}
+    >
+      <StatusDot
+        label="at risk"
+        count={atRisk}
+        active={atRisk > 0}
+        activeColor="#9a7a1a"
+      />
+      <StatusDot
+        label={openBlockers === 1 ? "blocker" : "blockers"}
+        count={openBlockers}
+        active={openBlockers > 0}
+        activeColor="#b4451e"
+      />
+      <span className="small muted" title="Overall team state">
+        · {qualitative}
+      </span>
+    </div>
+  );
+}
+
+function StatusDot({
+  label,
+  count,
+  active,
+  activeColor,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  activeColor: string;
+}) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        color: active ? activeColor : "var(--muted)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: active ? activeColor : "var(--line, #d6d2c8)",
+          display: "inline-block",
+        }}
+      />
+      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: active ? 600 : 400 }}>
+        {count}
+      </span>
+      <span className="small" style={{ color: "inherit" }}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
+function MorningBrief({
   authedFetch,
   teamId,
 }: {
   authedFetch: AuthedFetch;
   teamId: string | undefined;
 }) {
-  const [q, setQ] = useState("");
-  const [answer, setAnswer] = useState<string | null>(null);
+  type Brief = { changed: string[]; atRisk: string[]; needsDecision: string[] };
+  const [brief, setBrief] = useState<Brief | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!teamId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await authedFetch("/api/v2/brief", {
+        method: "POST",
+        body: JSON.stringify({ teamId }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Could not load brief.");
+        return;
+      }
+      const data = (await res.json()) as { brief: Brief; generatedAt: string };
+      setBrief(data.brief);
+      setGeneratedAt(data.generatedAt);
+    } catch {
+      setError("Could not load brief.");
+    } finally {
+      setBusy(false);
+    }
+  }, [authedFetch, teamId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const empty =
+    brief !== null &&
+    brief.changed.length === 0 &&
+    brief.atRisk.length === 0 &&
+    brief.needsDecision.length === 0;
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2 className="section-title">Morning brief</h2>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          {generatedAt && (
+            <span className="section-meta" title={generatedAt}>
+              {formatRelative(generatedAt)}
+            </span>
+          )}
+          <button className="btn-ghost small" onClick={() => void load()} disabled={busy || !teamId}>
+            {busy ? "…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+      {error && <div className="empty">{error}</div>}
+      {!error && brief === null && !busy && (
+        <div className="empty">Pulling the last few days together…</div>
+      )}
+      {!error && empty && (
+        <div className="empty">Quiet — nothing new worth flagging in the last few days.</div>
+      )}
+      {!error && brief && !empty && (
+        <div className="stack" style={{ gap: 10 }}>
+          <BriefColumn label="What changed" items={brief.changed} accent="neutral" />
+          <BriefColumn label="What's at risk" items={brief.atRisk} accent="warn" />
+          <BriefColumn label="Needs a decision" items={brief.needsDecision} accent="accent" />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BriefColumn({
+  label,
+  items,
+  accent,
+}: {
+  label: string;
+  items: string[];
+  accent: "neutral" | "warn" | "accent";
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <div className={`small muted`} style={{ marginBottom: 4 }}>
+        {label}
+      </div>
+      <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.45 }}>
+        {items.map((it, i) => (
+          <li
+            key={i}
+            className={accent === "warn" ? "warn" : accent === "accent" ? "accent" : undefined}
+          >
+            {it}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// Check-ins Lattice would send out on its own. Derived live from state.
+function Nudges({
+  authedFetch,
+  teamId,
+  onReply,
+}: {
+  authedFetch: AuthedFetch;
+  teamId: string | undefined;
+  onReply: (text: string) => void;
+}) {
+  type Nudge = {
+    id: string;
+    kind: string;
+    person: string;
+    prompt: string;
+    reason: string;
+    urgency: 1 | 2 | 3;
+  };
+  const [nudges, setNudges] = useState<Nudge[] | null>(null);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!teamId) return;
+    setBusy(true);
+    try {
+      const res = await authedFetch(`/api/v2/nudges?team=${encodeURIComponent(teamId)}`);
+      if (!res.ok) {
+        setNudges([]);
+        return;
+      }
+      const data = (await res.json()) as { nudges?: Nudge[] };
+      setNudges(data.nudges ?? []);
+    } catch {
+      setNudges([]);
+    } finally {
+      setBusy(false);
+    }
+  }, [authedFetch, teamId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const visible = (nudges ?? []).filter((n) => !dismissed.has(n.id));
+
+  if (nudges === null && busy) return null;
+  if (visible.length === 0) return null;
+
+  return (
+    <section className="section">
+      <div className="section-head">
+        <h2 className="section-title">Needs a check-in</h2>
+        <span className="section-meta">{visible.length}</span>
+      </div>
+      <div className="stack" style={{ gap: 8 }}>
+        {visible.slice(0, 5).map((n) => (
+          <div
+            key={n.id}
+            className="commitment"
+            style={{ gridTemplateColumns: "1fr auto", alignItems: "center" }}
+          >
+            <div>
+              <div className="commitment-title">{n.prompt}</div>
+              <div className="commitment-meta">
+                <span className={`urgency-pill u-${n.urgency}`}>
+                  {n.urgency >= 3 ? "High" : n.urgency === 2 ? "Medium" : "Low"}
+                </span>
+                <span>{n.person}</span>
+                <span>· {n.reason}</span>
+              </div>
+            </div>
+            <div className="row" style={{ gap: 6 }}>
+              <button
+                className="btn-ghost small"
+                onClick={() => onReply(n.prompt)}
+                title="Send this to the chat so you can reply"
+              >
+                Reply
+              </button>
+              <button
+                className="btn-ghost small"
+                onClick={() =>
+                  setDismissed((prev) => {
+                    const next = new Set(prev);
+                    next.add(n.id);
+                    return next;
+                  })
+                }
+                title="Hide this for now"
+              >
+                Snooze
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// Single entry point: ask Lattice OR tell Lattice. One input, one thread.
+// Classifies intent — questions go to /api/v2/ask, statements to /api/v2/interpret
+// and land as real state (blockers, commitments, etc.). The floating orb pipes
+// voice into the same thread via `orbKick`.
+function LatticeChat({
+  authedFetch,
+  teamId,
+  onState,
+  orbKick,
+  prefill,
+}: {
+  authedFetch: AuthedFetch;
+  teamId: string | undefined;
+  onState: (s: LatticeState) => void;
+  orbKick: number;
+  prefill: { text: string; at: number } | null;
+}) {
+  type Turn = { role: "user" | "assistant"; content: string; kind?: "ask" | "update" };
+  const MAX_TURNS = 6;
+  const [q, setQ] = useState("");
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+
   const samples = [
-    "Where are we most at risk?",
+    "What am I forgetting?",
+    "Blocked on auth — need Priya today.",
     "Who's overloaded?",
-    "What changed since yesterday?",
-    "Is the goal still realistic?",
+    "Dropping analytics, focus on demo.",
+    "Give me the 7am read.",
   ];
 
-  const ask = async (text: string) => {
-    if (!text.trim() || !teamId) return;
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [turns, busy]);
+
+  // Classify: questions go to ask, everything else is logged as state.
+  const looksLikeQuestion = (text: string): boolean => {
+    const t = text.trim();
+    if (!t) return false;
+    if (t.endsWith("?")) return true;
+    const first = t.split(/\s+/)[0]?.toLowerCase() ?? "";
+    const qStarters = new Set([
+      "what", "who", "when", "where", "why", "how", "which",
+      "is", "are", "am", "do", "does", "did", "can", "could",
+      "should", "would", "will", "was", "were", "have", "has",
+    ]);
+    return qStarters.has(first);
+  };
+
+  const runAsk = async (text: string, history: Turn[]) => {
+    const res = await authedFetch("/api/v2/ask", {
+      method: "POST",
+      body: JSON.stringify({
+        query: text,
+        teamId,
+        history: history.map((t) => ({ role: t.role, content: t.content })),
+      }),
+    });
+    const data = (await res.json()) as { answer?: string; error?: string };
+    return data.answer ?? data.error ?? "No answer.";
+  };
+
+  const runUpdate = async (text: string) => {
+    const res = await authedFetch("/api/v2/interpret", {
+      method: "POST",
+      body: JSON.stringify({ input: text, apply: true, teamId }),
+    });
+    const data = (await res.json()) as
+      | { interpretation: InterpretationV2; state: LatticeState }
+      | { error: string };
+    if ("error" in data) return data.error;
+    if (data.state) onState(data.state);
+    const reply = data.interpretation.reply || "Logged.";
+    const recorded = data.interpretation.richReply?.recorded ?? [];
+    return recorded.length > 0 ? `${reply}\n\n· ${recorded.slice(0, 3).join("\n· ")}` : reply;
+  };
+
+  const send = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || !teamId || busy) return;
     setBusy(true);
-    setAnswer(null);
+    setStatus(null);
+    setQ("");
+    const kind: "ask" | "update" = looksLikeQuestion(trimmed) ? "ask" : "update";
+    const userTurn: Turn = { role: "user", content: trimmed, kind };
+    const history = turns.slice(-MAX_TURNS);
+    setTurns((prev) => [...prev, userTurn]);
     try {
-      const res = await authedFetch("/api/v2/ask", {
-        method: "POST",
-        body: JSON.stringify({ query: text.trim(), teamId }),
-      });
-      const data = (await res.json()) as { answer?: string; error?: string };
-      setAnswer(data.answer ?? data.error ?? "No answer.");
+      const answer =
+        kind === "ask" ? await runAsk(trimmed, history) : await runUpdate(trimmed);
+      setTurns((prev) => [...prev, { role: "assistant", content: answer, kind }]);
     } catch (e) {
-      setAnswer(e instanceof Error ? e.message : "Ask failed.");
+      setTurns((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: e instanceof Error ? e.message : "Something went wrong.",
+          kind,
+        },
+      ]);
     } finally {
       setBusy(false);
     }
   };
 
+  const startRecord = useCallback(async () => {
+    if (recording || busy) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const form = new FormData();
+        form.append("audio", blob, "update.webm");
+        setStatus("Transcribing…");
+        try {
+          const res = await authedFetch("/api/transcribe", { method: "POST", body: form });
+          const raw = await res.text();
+          const data = (raw ? JSON.parse(raw) : {}) as { text?: string; error?: string };
+          setStatus(null);
+          if (!res.ok || data.error) {
+            setStatus(data.error ?? `Transcription failed (${res.status}).`);
+            return;
+          }
+          if (data.text) await send(data.text);
+          else setStatus("Nothing was transcribed — try again.");
+        } catch (e) {
+          setStatus(e instanceof Error ? e.message : "Transcription failed.");
+        }
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+      setStatus("Recording — tap mic again to stop.");
+    } catch {
+      setStatus("Microphone unavailable.");
+    }
+    // send is intentionally not in deps — we want the latest closure at stop time
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authedFetch, recording, busy]);
+
+  const stopRecord = useCallback(() => {
+    recorderRef.current?.stop();
+    setRecording(false);
+  }, []);
+
+  // Floating orb click → focus chat + start recording.
+  useEffect(() => {
+    if (orbKick === 0) return;
+    sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    inputRef.current?.focus();
+    if (!recording) void startRecord();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orbKick]);
+
+  // External prefill (e.g. "Reply" on a nudge) → drop it into the input.
+  useEffect(() => {
+    if (!prefill) return;
+    setQ(prefill.text);
+    sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    inputRef.current?.focus();
+  }, [prefill]);
+
+  const reset = () => {
+    setTurns([]);
+    setQ("");
+    setStatus(null);
+  };
+
+  const visibleTurns = turns.slice(-MAX_TURNS);
+
   return (
-    <section className="section ask-section">
+    <section ref={sectionRef} className="section ask-section">
       <div className="ask-box">
+        <div className="section-head" style={{ marginBottom: 8 }}>
+          <h2 className="section-title">Talk to Lattice</h2>
+          <span className="section-meta">Ask a question, or just tell it what&apos;s happening.</span>
+        </div>
+        {visibleTurns.length > 0 && (
+          <div
+            ref={threadRef}
+            className="ask-thread"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+              maxHeight: 320,
+              overflowY: "auto",
+              marginBottom: 10,
+              padding: "4px 2px",
+            }}
+          >
+            {visibleTurns.map((t, i) => (
+              <div
+                key={i}
+                className={`ask-turn ${t.role}`}
+                style={{
+                  alignSelf: t.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "85%",
+                  padding: "8px 12px",
+                  borderRadius: 12,
+                  background: t.role === "user" ? "var(--line-soft, #f5f4f1)" : "transparent",
+                  border: t.role === "assistant" ? "1px solid var(--line)" : "none",
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.45,
+                }}
+              >
+                {t.role === "user" && t.kind === "update" && (
+                  <div className="small muted" style={{ marginBottom: 2 }}>
+                    logged as update
+                  </div>
+                )}
+                {t.content}
+              </div>
+            ))}
+            {busy && (
+              <div
+                className="ask-turn assistant thinking"
+                style={{ alignSelf: "flex-start", padding: "8px 12px" }}
+              >
+                <span className="dot" /> <span className="dot" /> <span className="dot" />
+              </div>
+            )}
+          </div>
+        )}
+        {status && (
+          <div className="small muted" style={{ marginBottom: 6 }}>
+            {status}
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void ask(q);
+            void send(q);
           }}
           className="ask-form"
         >
+          <button
+            type="button"
+            className={`voice-orb ${recording ? "recording" : ""}`}
+            onClick={recording ? stopRecord : startRecord}
+            aria-label={recording ? "Stop recording" : "Start recording"}
+            style={{ width: 36, height: 36, flex: "0 0 auto" }}
+            disabled={busy && !recording}
+          >
+            <span className="voice-dot" />
+          </button>
           <input
+            ref={inputRef}
             className="ask-input"
             type="text"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Ask Lattice about your team…"
+            placeholder={
+              visibleTurns.length === 0
+                ? "Ask Lattice — or just tell it what's happening."
+                : "Follow up, or log another update…"
+            }
           />
           <button type="submit" className="btn-primary small" disabled={busy || !q.trim()}>
-            {busy ? "…" : "Ask"}
+            {busy ? "…" : "Send"}
           </button>
-        </form>
-        <div className="ask-samples">
-          {samples.map((s) => (
+          {turns.length > 0 && (
             <button
-              key={s}
               type="button"
-              className="sample-chip"
-              onClick={() => {
-                setQ(s);
-                void ask(s);
-              }}
+              className="btn-ghost small"
+              onClick={reset}
+              disabled={busy}
+              title="Start a fresh conversation"
             >
-              {s}
+              New
             </button>
-          ))}
-        </div>
-        {busy && (
-          <div className="ask-answer thinking">
-            <span className="dot" /> <span className="dot" /> <span className="dot" />
+          )}
+        </form>
+        {visibleTurns.length === 0 && (
+          <div className="ask-samples">
+            {samples.map((s) => (
+              <button
+                key={s}
+                type="button"
+                className="sample-chip"
+                onClick={() => void send(s)}
+              >
+                {s}
+              </button>
+            ))}
           </div>
         )}
-        {!busy && answer && <div className="ask-answer">{answer}</div>}
       </div>
     </section>
   );
@@ -1634,7 +2939,7 @@ function ConfidenceSparkline({
 function labelForType(t: FieldObjectType): string {
   const map: Record<FieldObjectType, string> = {
     intent: "Intent",
-    promise: "Promises",
+    promise: "Commitments",
     blocker: "Blockers",
     request: "Requests",
     reminder: "Reminders",

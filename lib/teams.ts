@@ -1,6 +1,8 @@
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { randomBytes } from "crypto";
 
+import { createSupabaseServiceClient } from "@/lib/supabase";
+
 export type TeamRole = "owner" | "admin" | "member";
 export type InviteState = "pending" | "accepted" | "revoked" | "expired";
 
@@ -10,6 +12,7 @@ export type TeamSummary = {
   role: TeamRole;
   memberCount?: number;
   createdBy?: string | null;
+  memberName?: string;
 };
 
 export type TeamMemberRecord = {
@@ -18,6 +21,18 @@ export type TeamMemberRecord = {
   name: string;
   role: TeamRole;
   email?: string | null;
+  skills?: string[];
+  focus?: string | null;
+  bio?: string | null;
+};
+
+export type MemberStats = {
+  completed: number;
+  openCount: number;
+  overdueCount: number;
+  declinedCount: number;
+  onTimeRate: number | null; // 0..1, null if no completed+due data
+  avgDeliveryHours: number | null;
 };
 
 export type TeamInvite = {
@@ -56,12 +71,13 @@ export async function listUserTeams(
 ): Promise<TeamSummary[]> {
   const { data, error } = await supabase
     .from("team_members")
-    .select("role, team_space_id, team_spaces(id, name, created_by)")
+    .select("role, team_space_id, name, team_spaces(id, name, created_by)")
     .eq("user_id", userId);
   if (error) throw error;
   type Row = {
     role: TeamRole;
     team_space_id: string;
+    name: string | null;
     team_spaces:
       | { id: string; name: string; created_by: string | null }
       | { id: string; name: string; created_by: string | null }[]
@@ -74,6 +90,7 @@ export async function listUserTeams(
       name: space?.name ?? row.team_space_id,
       role: row.role,
       createdBy: space?.created_by ?? null,
+      memberName: row.name ?? undefined,
     };
   });
 }
@@ -131,16 +148,85 @@ export async function listTeamMembers(
 ): Promise<TeamMemberRecord[]> {
   const { data, error } = await supabase
     .from("team_members")
-    .select("id, user_id, name, role")
+    .select("id, user_id, name, role, skills, focus, bio")
     .eq("team_space_id", teamSpaceId);
   if (error) throw error;
-  type Row = { id: string; user_id: string; name: string; role: TeamRole };
-  return ((data ?? []) as Row[]).map((r) => ({
+  type Row = {
+    id: string;
+    user_id: string;
+    name: string;
+    role: TeamRole;
+    skills: string[] | null;
+    focus: string | null;
+    bio: string | null;
+  };
+  const rows = (data ?? []) as Row[];
+
+  // Enrich with auth.users.email when the service role key is available.
+  // Without it we simply omit the email field — caller already allows it.
+  const admin = createSupabaseServiceClient();
+  const emails = new Map<string, string>();
+  if (admin) {
+    const results = await Promise.all(
+      rows.map(async (r) => {
+        try {
+          return await admin.auth.admin.getUserById(r.user_id);
+        } catch (err) {
+          console.error("listTeamMembers: getUserById failed", r.user_id, err);
+          return null;
+        }
+      }),
+    );
+    results.forEach((res, i) => {
+      if (res?.error) {
+        console.error("listTeamMembers: getUserById error", rows[i].user_id, res.error);
+      }
+      const email = res?.data?.user?.email;
+      if (email) emails.set(rows[i].user_id, email);
+    });
+  } else if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn(
+      "listTeamMembers: SUPABASE_SERVICE_ROLE_KEY not set — emails will be omitted.",
+    );
+  }
+
+  return rows.map((r) => ({
     id: r.id,
     userId: r.user_id,
     name: r.name,
     role: r.role,
+    email: emails.get(r.user_id) ?? null,
+    skills: r.skills ?? [],
+    focus: r.focus,
+    bio: r.bio,
   }));
+}
+
+export async function updateMemberProfile(
+  supabase: SupabaseClient,
+  params: {
+    teamSpaceId: string;
+    memberId: string;
+    skills?: string[];
+    focus?: string | null;
+    bio?: string | null;
+  },
+): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (params.skills !== undefined) patch.skills = params.skills;
+  if (params.focus !== undefined) patch.focus = params.focus;
+  if (params.bio !== undefined) patch.bio = params.bio;
+  if (Object.keys(patch).length === 0) return;
+  const { data, error } = await supabase
+    .from("team_members")
+    .update(patch)
+    .eq("id", params.memberId)
+    .eq("team_space_id", params.teamSpaceId)
+    .select("id");
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new Error("Profile update denied (you can only edit your own row).");
+  }
 }
 
 export async function createInvite(
@@ -194,6 +280,7 @@ export async function listInvites(
     .from("team_invitations")
     .select("id, team_space_id, email, role, state, token, expires_at, created_at")
     .eq("team_space_id", teamSpaceId)
+    .eq("state", "pending")
     .order("created_at", { ascending: false });
   if (error) throw error;
   return (data ?? []).map((row) => ({
@@ -212,11 +299,16 @@ export async function revokeInvite(
   supabase: SupabaseClient,
   inviteId: string,
 ): Promise<void> {
-  const { error } = await supabase
+  // .select() after update returns affected rows — 0 means RLS denied or not found.
+  const { data, error } = await supabase
     .from("team_invitations")
     .update({ state: "revoked" })
-    .eq("id", inviteId);
+    .eq("id", inviteId)
+    .select("id");
   if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new Error("Revoke denied (admin required or invite not found).");
+  }
 }
 
 export async function acceptInvite(

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
+import { LATTICE_PERSONA } from "@/lib/persona";
 import { getUserActiveTeam } from "@/lib/teams";
 import { atRiskCount, goalDrift, structuralAnalysis, teamConfidence } from "@/lib/v2";
 import { fetchLatticeState } from "@/lib/v2-db";
@@ -15,7 +16,8 @@ export async function POST(request: Request) {
   const auth = await requireUserSupabaseClient(request);
   if ("error" in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
-  let body: { query?: string; teamId?: string };
+  type HistoryTurn = { role: "user" | "assistant"; content: string };
+  let body: { query?: string; teamId?: string; history?: HistoryTurn[] };
   try {
     body = await request.json();
   } catch {
@@ -23,6 +25,21 @@ export async function POST(request: Request) {
   }
   const query = body.query?.trim();
   if (!query) return NextResponse.json({ error: "query required." }, { status: 400 });
+
+  // Short rolling window — enough for follow-ups ("why?", "what about him?"),
+  // not enough to drift into a ChatGPT thread.
+  const history = Array.isArray(body.history)
+    ? body.history
+        .filter(
+          (t) =>
+            t &&
+            (t.role === "user" || t.role === "assistant") &&
+            typeof t.content === "string" &&
+            t.content.trim().length > 0,
+        )
+        .slice(-6)
+        .map((t) => ({ role: t.role, content: t.content.slice(0, 800) }))
+    : [];
 
   try {
     const team = await getUserActiveTeam(auth.supabase, auth.user.id, body.teamId ?? null);
@@ -57,21 +74,18 @@ export async function POST(request: Request) {
       `Structural: ${struct.overloaded.length ? `overloaded: ${struct.overloaded.map((o) => `${o.owner}(${o.count})`).join(", ")}` : "no overload"} · ${drift.driftingCommitments.length} commitments drifting from goal`,
     ].join("\n");
 
-    const systemPrompt = `You are Lattice — the live model of this team's state.
+    const systemPrompt = `${LATTICE_PERSONA}
 
-You answer questions about the team *using only the provided state*. You are concise, honest, and specific. Style rules:
-- Plain English, no bullet lists unless listing things.
-- Name people and commitments directly.
-- If the answer genuinely isn't in the state, say so in one sentence — don't invent.
-- If the state implies a risk the user didn't ask about but should know, add one short sentence at the end starting "Worth knowing: ".
-- Never use words like "currently", "as an AI", "based on the provided data". Just answer.
-- 2–4 sentences. Conversational, calm, slightly clipped. Like a chief of staff who's been paying attention.`;
+You are answering a direct question from a teammate. Use only the state provided below — never invent people, commitments, or dates. If the state doesn't answer the question, say that in one sentence.
+
+Prior turns in this conversation are included for continuity so follow-ups like "why?", "what about them?", or "and the other one?" resolve correctly. Do not restate earlier answers. If the new question doesn't reference the prior thread, ignore the history.`;
 
     if (!process.env.OPENAI_API_KEY) {
-      // Fallback without AI: deterministic mini-answer.
+      // Deterministic fallback without AI — still in voice.
+      const blockers = state.fieldObjects.filter((f) => f.type === "blocker").length;
       const fallback = activeGoal
-        ? `No OpenAI key set, so I can only reply with raw state: goal is "${activeGoal.title}", confidence ${Math.round(teamConfidence(state) * 100)}%, ${state.fieldObjects.filter((f) => f.type === "blocker").length} blockers open.`
-        : "No goal set yet.";
+        ? `Goal is "${activeGoal.title}". Confidence ${Math.round(teamConfidence(state) * 100)}%, ${blockers} open blocker${blockers === 1 ? "" : "s"}. Wire up an OpenAI key and I'll stop reading you the raw numbers.`
+        : "No goal is set. Hard to have a point of view on a team that hasn't said what it's doing.";
       return NextResponse.json({ answer: fallback, state, team });
     }
 
@@ -80,11 +94,13 @@ You answer questions about the team *using only the provided state*. You are con
       model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `State:\n\n${context}\n\nQuestion: ${query}` },
+        { role: "system", content: `Current state (source of truth):\n\n${context}` },
+        ...history,
+        { role: "user", content: query },
       ],
-      temperature: 0.4,
+      temperature: 0.6,
     });
-    const answer = completion.choices[0]?.message?.content?.trim() ?? "No response.";
+    const answer = completion.choices[0]?.message?.content?.trim() ?? "Nothing to say on that.";
 
     return NextResponse.json({ answer, state, team });
   } catch (err) {

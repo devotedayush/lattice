@@ -1,5 +1,8 @@
 import OpenAI from "openai";
 
+import { statsForAllMembers, summarizeStats } from "@/lib/member-stats";
+import { LATTICE_PERSONA } from "@/lib/persona";
+import type { TeamMemberRecord } from "@/lib/teams";
 import type {
   DetectedChangeEvent,
   DetectedIntervention,
@@ -7,8 +10,9 @@ import type {
   LatticeState,
 } from "@/lib/v2";
 
-const systemPrompt = `You are Lattice, an AI-native team execution memory.
-You do not manage tasks. You model the evolving reality of a team.
+const systemPrompt = `${LATTICE_PERSONA}
+
+Right now you are ingesting a single natural-language update from a teammate and returning structured state. You do not manage tasks. You model the evolving reality of a team.
 
 You are given:
 - the team's current GOAL
@@ -30,7 +34,8 @@ Produce a JSON object with this exact shape:
   "entities": [                            // V1 surface entities (keep these — shown in the field)
     { "type": "intent"|"promise"|"blocker"|"shift"|"request"|"reminder"|"signal",
       "title": string, "detail": string, "owner"?: string, "trigger"?: string,
-      "target"?: string, "why"?: string, "linkedTo"?: string, "confidence"?: number }
+      "target"?: string, "why"?: string, "linkedTo"?: string, "confidence"?: number,
+      "dueAt"?: string /* ISO 8601 if the input mentions a deadline like "by Friday", "tomorrow EOD", "May 5", "in 3 days" — resolve relative dates to absolute UTC */ }
   ],
   "changes": [                             // first-class change events this update implies
     { "kind": "goal_shift"|"scope_change"|"priority_change"|"deadline_move"|"owner_change"
@@ -59,9 +64,21 @@ Principles:
 - If scope narrowed/expanded → scope_change; deadline moved → deadline_move.
 - Prefer reusing an existing goal/commitment rather than duplicating.
 - Suggested next steps should be small, specific, and actionable.
-- Reply in the user's tone; never lecture.`;
+- Reply in the user's tone; never lecture.
 
-function buildContextBlock(state: LatticeState): string {
+Due date extraction:
+- If the input includes a deadline ("by Friday", "tomorrow EOD", "before the 5th", "in 3 days", "end of week"), resolve to an absolute ISO 8601 UTC timestamp in dueAt. Use the current time as the anchor. Do not invent a due date if none is stated.
+- "EOD" = 23:59 local-equivalent UTC of that day. "Morning" = 09:00. If only a day is given, assume end of day (23:59).
+
+Owner extraction rules (critical — do not violate):
+- If the input names a specific person as the owner (e.g. "assigned to Priya", "Raj will do X", "Meera is handling Y", "to Know2"), put ONLY that person's name in the "owner" field. Prefer the exact name as written.
+- Strip assignment phrasing from the entity "title" — the title should describe the work, not include "assigned to ___". "Demo video assigned to know2" → title: "Demo video", owner: "know2".
+- If the reporter says "I / me / my / self", that is not a specific assignment. Leave "owner" empty — do not use "me", "self", "you", or the reporter's name.
+- If no person is named, leave "owner" empty. Never default to the reporter. Never guess.
+- If multiple items are assigned to multiple people in one update, emit multiple entities, each with the correct single owner.
+- When a TEAM_MEMBERS block is present with skills/focus/delivery stats, prefer a named owner that matches the work. Only suggest in "reply" or "suggested" — never set owner yourself unless the reporter explicitly named a person. When suggesting, cite the reason briefly ("skills match", "low current load", "shipped 3 similar last month").`;
+
+function buildContextBlock(state: LatticeState, members: TeamMemberRecord[] = []): string {
   const activeGoal = state.goals.find((g) => g.state === "active");
   const commitments = state.fieldObjects
     .filter((f) => f.type === "promise" || f.type === "blocker" || f.type === "request")
@@ -82,9 +99,26 @@ function buildContextBlock(state: LatticeState): string {
     .map((c) => `- ${c.kind}: ${c.summary}`)
     .join("\n");
 
+  let memberBlock = "";
+  if (members.length) {
+    const stats = statsForAllMembers(
+      state,
+      members.map((m) => m.name),
+    );
+    memberBlock = members
+      .map((m) => {
+        const skills = m.skills?.length ? ` · skills: ${m.skills.join(", ")}` : "";
+        const focus = m.focus ? ` · focus: ${m.focus}` : "";
+        const s = summarizeStats(stats[m.name]);
+        return `- ${m.name} (${m.role})${skills}${focus} — ${s}`;
+      })
+      .join("\n");
+  }
+
   return [
     `GOAL: ${activeGoal ? `${activeGoal.title} (confidence ${activeGoal.confidence.toFixed(2)})` : state.intent || "—"}`,
     activeGoal?.detail ? `GOAL_DETAIL: ${activeGoal.detail}` : "",
+    memberBlock ? `TEAM_MEMBERS (with delivery history):\n${memberBlock}` : "",
     commitments ? `CURRENT_COMMITMENTS:\n${commitments}` : "",
     assumptions ? `OPEN_ASSUMPTIONS:\n${assumptions}` : "",
     recent ? `RECENT_CHANGES:\n${recent}` : "",
@@ -96,6 +130,7 @@ function buildContextBlock(state: LatticeState): string {
 export async function interpretV2(
   input: string,
   state: LatticeState,
+  members: TeamMemberRecord[] = [],
 ): Promise<InterpretationV2> {
   const text = input.trim();
   if (!text) {
@@ -116,7 +151,10 @@ export async function interpretV2(
       model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Context:\n\n${buildContextBlock(state)}\n\nUPDATE:\n${text}` },
+        {
+          role: "user",
+          content: `Context:\n\n${buildContextBlock(state, members)}\n\nUPDATE:\n${text}`,
+        },
       ],
       response_format: { type: "json_object" },
     });

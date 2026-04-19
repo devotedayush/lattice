@@ -263,6 +263,7 @@ export async function applyInterpretationV2ToDatabase(
       target: e.target,
       why: e.why,
       linkedTo: e.linkedTo,
+      dueAt: e.dueAt,
     })),
     followUpQuestion: interpretation.followUpQuestion,
     broadcast: interpretation.broadcast,

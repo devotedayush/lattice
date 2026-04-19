@@ -27,10 +27,16 @@ export async function POST(request: Request) {
     apiKey: process.env.OPENAI_API_KEY,
   });
 
-  const transcription = await openai.audio.transcriptions.create({
-    file,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
-  });
-
-  return NextResponse.json({ text: transcription.text });
+  try {
+    const transcription = await openai.audio.transcriptions.create({
+      file,
+      model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
+    });
+    return NextResponse.json({ text: transcription.text });
+  } catch (err) {
+    console.error("/api/transcribe failed", err);
+    const message =
+      err instanceof Error ? err.message : "Transcription failed.";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }

@@ -58,6 +58,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ t
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error("invites DELETE", err);
-    return NextResponse.json({ error: "Revoke failed." }, { status: 403 });
+    const msg = err instanceof Error ? err.message : "Revoke failed.";
+    return NextResponse.json({ error: msg }, { status: 403 });
   }
 }

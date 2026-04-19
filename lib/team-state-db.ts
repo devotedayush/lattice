@@ -32,6 +32,9 @@ type FieldObjectRow = {
   position_y: number | string;
   pulse: FieldObject["pulse"];
   links: string[] | null;
+  due_at: string | null;
+  deferred_until: string | null;
+  decline_reason: string | null;
 };
 
 type MemoryEventRow = {
@@ -74,6 +77,9 @@ function toFieldObject(row: FieldObjectRow): FieldObject {
     y: Number(row.position_y),
     pulse: row.pulse,
     links: row.links ?? [],
+    dueAt: row.due_at ?? undefined,
+    deferredUntil: row.deferred_until ?? undefined,
+    declineReason: row.decline_reason ?? undefined,
   };
 }
 
@@ -101,7 +107,9 @@ export async function fetchTeamState(teamSpaceId = DEFAULT_TEAM_SPACE_ID, client
       .single<TeamSpaceRow>(),
     supabase
       .from("field_objects")
-      .select("id, type, title, detail, owner, status, confidence, position_x, position_y, pulse, links")
+      .select(
+        "id, type, title, detail, owner, status, confidence, position_x, position_y, pulse, links, due_at, deferred_until, decline_reason",
+      )
       .eq("team_space_id", teamSpaceId)
       .order("created_at", { ascending: true }),
     supabase
@@ -203,6 +211,7 @@ export async function applyInterpretationToDatabase(
         position_y: object.y,
         pulse: object.pulse,
         links: object.links ?? [],
+        due_at: object.dueAt ?? null,
       })),
     );
     if (error) throw error;
