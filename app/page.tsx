@@ -2813,19 +2813,35 @@ function LatticeChat({
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        // Use the recorder's actual mimeType — Safari produces audio/mp4, not webm.
+        // Hardcoding "audio/webm" is how we end up with OpenAI rejecting the file.
+        const mime = recorder.mimeType || "audio/webm";
+        const ext = mime.includes("mp4") ? "mp4" : mime.includes("ogg") ? "ogg" : mime.includes("wav") ? "wav" : "webm";
+        const blob = new Blob(chunksRef.current, { type: mime });
         const form = new FormData();
-        form.append("audio", blob, "update.webm");
-        setStatus("Transcribing…");
+        form.append("audio", blob, `update.${ext}`);
+        setStatus(`Transcribing… (${mime}, ${Math.round(blob.size / 1024)} KB)`);
         try {
           const res = await authedFetch("/api/transcribe", { method: "POST", body: form });
           const raw = await res.text();
-          const data = (raw ? JSON.parse(raw) : {}) as { text?: string; error?: string };
-          setStatus(null);
-          if (!res.ok || data.error) {
-            setStatus(data.error ?? `Transcription failed (${res.status}).`);
+          let data: { text?: string; error?: string; upstreamStatus?: number; file?: { type?: string; size?: number }; model?: string } = {};
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch {
+            setStatus(`Transcription failed (HTTP ${res.status}): ${raw.slice(0, 200) || "no body"}`);
             return;
           }
+          if (!res.ok || data.error) {
+            const parts = [
+              `Transcription failed (HTTP ${res.status}${data.upstreamStatus ? `/upstream ${data.upstreamStatus}` : ""})`,
+              data.file ? `sent: ${data.file.type ?? "?"} ${Math.round((data.file.size ?? 0) / 1024)}KB` : null,
+              data.model ? `model: ${data.model}` : null,
+              data.error ?? null,
+            ].filter(Boolean);
+            setStatus(parts.join(" · "));
+            return;
+          }
+          setStatus(null);
           if (data.text) await send(data.text);
           else setStatus("Nothing was transcribed — try again.");
         } catch (e) {
@@ -3219,15 +3235,29 @@ function ComposerSheet({
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const mime = recorder.mimeType || "audio/webm";
+        const ext = mime.includes("mp4") ? "mp4" : mime.includes("ogg") ? "ogg" : mime.includes("wav") ? "wav" : "webm";
+        const blob = new Blob(chunksRef.current, { type: mime });
         const form = new FormData();
-        form.append("audio", blob, "update.webm");
-        setStatus("Transcribing…");
+        form.append("audio", blob, `update.${ext}`);
+        setStatus(`Transcribing… (${mime}, ${Math.round(blob.size / 1024)} KB)`);
         try {
           const res = await authedFetch("/api/transcribe", { method: "POST", body: form });
-          const data = (await res.json()) as { text?: string; error?: string };
-          if (data.error) {
-            setStatus(data.error);
+          const raw = await res.text();
+          let data: { text?: string; error?: string; upstreamStatus?: number; file?: { type?: string; size?: number }; model?: string } = {};
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch {
+            setStatus(`Transcription failed (HTTP ${res.status}): ${raw.slice(0, 200) || "no body"}`);
+            return;
+          }
+          if (!res.ok || data.error) {
+            const parts = [
+              `Transcription failed (HTTP ${res.status}${data.upstreamStatus ? `/upstream ${data.upstreamStatus}` : ""})`,
+              data.file ? `sent: ${data.file.type ?? "?"} ${Math.round((data.file.size ?? 0) / 1024)}KB` : null,
+              data.error ?? null,
+            ].filter(Boolean);
+            setStatus(parts.join(" · "));
             return;
           }
           if (data.text) {
