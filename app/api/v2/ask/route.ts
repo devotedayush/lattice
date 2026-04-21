@@ -13,18 +13,24 @@ import { fetchLatticeState } from "@/lib/v2-db";
 // as context. This is what makes Lattice feel alive — you can ask it about
 // the org instead of just feeding it updates.
 export async function POST(request: Request) {
+  // Track which stage is running so a 500 can name the culprit instead of
+  // collapsing to a generic "Ask failed." — otherwise prod triage is guesswork.
+  let stage: "auth" | "body" | "team" | "state" | "openai" | "unknown" = "auth";
+
   const auth = await requireUserSupabaseClient(request);
-  if ("error" in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
+  if ("error" in auth)
+    return NextResponse.json({ error: auth.error, stage: "auth" }, { status: auth.status });
 
   type HistoryTurn = { role: "user" | "assistant"; content: string };
   let body: { query?: string; teamId?: string; history?: HistoryTurn[] };
+  stage = "body";
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON.", stage }, { status: 400 });
   }
   const query = body.query?.trim();
-  if (!query) return NextResponse.json({ error: "query required." }, { status: 400 });
+  if (!query) return NextResponse.json({ error: "query required.", stage }, { status: 400 });
 
   // Short rolling window — enough for follow-ups ("why?", "what about him?"),
   // not enough to drift into a ChatGPT thread.
@@ -42,9 +48,11 @@ export async function POST(request: Request) {
     : [];
 
   try {
+    stage = "team";
     const team = await getUserActiveTeam(auth.supabase, auth.user.id, body.teamId ?? null);
-    if (!team) return NextResponse.json({ error: "No team." }, { status: 400 });
+    if (!team) return NextResponse.json({ error: "No team.", stage }, { status: 400 });
 
+    stage = "state";
     const state = await fetchLatticeState(auth.supabase, team.id);
     const activeGoal = state.goals.find((g) => g.state === "active");
     const drift = goalDrift(state);
@@ -89,9 +97,11 @@ Prior turns in this conversation are included for continuity so follow-ups like 
       return NextResponse.json({ answer: fallback, state, team });
     }
 
+    stage = "openai";
+    const model = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "system", content: APP_KNOWLEDGE },
@@ -105,7 +115,21 @@ Prior turns in this conversation are included for continuity so follow-ups like 
 
     return NextResponse.json({ answer, state, team });
   } catch (err) {
-    console.error("/api/v2/ask failed", err);
-    return NextResponse.json({ error: "Ask failed." }, { status: 500 });
+    console.error(`/api/v2/ask failed at stage=${stage}`, err);
+    const detail =
+      err instanceof Error ? `${err.name}: ${err.message}` : typeof err === "string" ? err : "unknown error";
+    // OpenAI SDK errors carry a numeric `status` we can pass through for clarity.
+    const upstreamStatus =
+      typeof err === "object" && err && "status" in err && typeof (err as { status: unknown }).status === "number"
+        ? ((err as { status: number }).status)
+        : undefined;
+    return NextResponse.json(
+      {
+        error: `Ask failed at ${stage}: ${detail}`,
+        stage,
+        upstreamStatus,
+      },
+      { status: 500 },
+    );
   }
 }

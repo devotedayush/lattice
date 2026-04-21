@@ -2733,8 +2733,24 @@ function LatticeChat({
         history: history.map((t) => ({ role: t.role, content: t.content })),
       }),
     });
-    const data = (await res.json()) as { answer?: string; error?: string };
-    return data.answer ?? data.error ?? "No answer.";
+    // Read as text first so we can still surface the failure when the platform
+    // returns HTML (Vercel 504/404 etc.) instead of the JSON envelope.
+    const raw = await res.text();
+    let data: { answer?: string; error?: string; stage?: string; upstreamStatus?: number } = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      return `Ask failed (HTTP ${res.status}): ${raw.slice(0, 200) || "no response body"}`;
+    }
+    if (!res.ok || data.error) {
+      const parts = [
+        `Ask failed (HTTP ${res.status}${data.upstreamStatus ? ` / upstream ${data.upstreamStatus}` : ""})`,
+        data.stage ? `stage=${data.stage}` : null,
+        data.error ?? null,
+      ].filter(Boolean);
+      return parts.join(" · ");
+    }
+    return data.answer ?? "No answer.";
   };
 
   const runUpdate = async (text: string) => {
