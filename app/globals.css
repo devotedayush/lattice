@@ -813,7 +813,7 @@ textarea {
 
 /* Utility */
 .stack { display: flex; flex-direction: column; gap: 10px; }
-.row { display: flex; align-items: center; gap: 10px; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .muted { color: var(--muted); }
 .right { margin-left: auto; }
 .small { font-size: 0.82rem; }
@@ -935,4 +935,64 @@ textarea {
   .intervention { grid-template-columns: 1fr; }
   .intervention-actions { justify-content: flex-start; }
   .shell { padding: 20px 16px 140px; }
+  .topbar { flex-wrap: wrap; }
+  .topbar-actions { flex-wrap: wrap; }
+  .sheet { width: min(720px, calc(100vw - 16px)); }
+}
+
+@media (max-width: 480px) {
+  .shell { padding: 16px 12px 120px; max-width: 100%; }
+  .tabs { flex-wrap: wrap; }
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .topbar-actions {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+  }
+  .auth-card {
+    padding: 20px;
+    width: calc(100vw - 24px);
+  }
+  .sheet {
+    width: calc(100vw - 16px);
+  }
+  .sheet-head,
+  .sheet-body {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .commitment {
+    grid-template-columns: 1fr;
+  }
+  .commitment-actions,
+  .commitment > *:last-child {
+    flex-wrap: wrap;
+  }
+  .timeline-item {
+    grid-template-columns: 28px 1fr;
+    gap: 4px 10px;
+  }
+  .timeline-item > *:last-child {
+    grid-column: 1 / -1;
+  }
+  .intervention-actions .btn-primary,
+  .intervention-actions .btn-ghost,
+  .intervention-actions .btn-secondary {
+    padding: 6px 10px;
+    font-size: 0.82rem;
+  }
+  .ask-form {
+    flex-wrap: wrap;
+  }
+  .ask-form .ask-form__new {
+    display: none;
+  }
+  .ask-form .btn-primary {
+    padding: 6px 12px;
+  }
 }

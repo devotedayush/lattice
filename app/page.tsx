@@ -458,9 +458,11 @@ function Topbar({
         <span className="live-status" aria-live="polite">{liveStatus}</span>
       </div>
       <div className="topbar-actions">
-        <button className="btn-ghost small" onClick={onSeed} disabled={seeding || !activeTeam} title="Wipe + load a rich demo story">
-          {seeding ? "Loading…" : "Load demo"}
-        </button>
+        {activeTeam?.role === "owner" && (
+          <button className="btn-ghost small" onClick={onSeed} disabled={seeding} title="Wipe + load a rich demo story">
+            {seeding ? "Loading…" : "Load demo"}
+          </button>
+        )}
         <div className="team-switch" style={{ position: "relative" }}>
           <button className="btn-ghost small" onClick={() => setOpen((o) => !o)}>
             {activeTeam ? activeTeam.name : "No team"} ▾
@@ -477,6 +479,7 @@ function Topbar({
                 borderRadius: 10,
                 padding: 6,
                 minWidth: 220,
+                maxWidth: "calc(100vw - 24px)",
                 zIndex: 60,
                 boxShadow: "0 8px 24px rgba(0,0,0,0.06)",
               }}
@@ -624,7 +627,7 @@ function FirstTeamGate({
 
         <h3 style={{ margin: "0 0 6px" }}>Joining an existing team?</h3>
         <p className="muted small">Paste the invite token someone sent you.</p>
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
           <input
             type="text"
             placeholder="invite token"
@@ -687,7 +690,7 @@ function CreateTeamModal({
 
   return (
     <div className="sheet-scrim" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "min(420px, calc(100vw - 16px))" }}>
         <div className="sheet-head">
           <div className="title">New team</div>
           <button className="btn-ghost small" onClick={onClose}>Close</button>
@@ -821,7 +824,7 @@ function ManageTeamModal({
 
   return (
     <div className="sheet-scrim" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 560 }}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "min(560px, calc(100vw - 16px))" }}>
         <div className="sheet-head">
           <div className="title">{team.name}</div>
           <button className="btn-ghost small" onClick={onClose}>Close</button>
@@ -901,7 +904,7 @@ function ManageTeamModal({
           {canAdmin && (
             <>
               <h4 style={{ marginTop: 18 }}>Invite someone</h4>
-              <form onSubmit={invite} className="row" style={{ gap: 8 }}>
+              <form onSubmit={invite} className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                 <input
                   type="email"
                   placeholder="teammate@company.com"
@@ -1763,6 +1766,7 @@ function CommitmentRow({
                 borderRadius: 10,
                 padding: 4,
                 minWidth: 180,
+                maxWidth: "calc(100vw - 24px)",
                 zIndex: 30,
                 boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
               }}
@@ -1978,6 +1982,7 @@ function DuePicker({
         padding: 10,
         zIndex: 30,
         minWidth: 220,
+        maxWidth: "calc(100vw - 24px)",
         boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
       }}
     >
@@ -2061,6 +2066,7 @@ function RespondPopover({
         padding: 12,
         zIndex: 30,
         minWidth: 280,
+        maxWidth: "calc(100vw - 24px)",
         boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
       }}
     >
@@ -2961,7 +2967,7 @@ function LatticeChat({
           {turns.length > 0 && (
             <button
               type="button"
-              className="btn-ghost small"
+              className="btn-ghost small ask-form__new"
               onClick={reset}
               disabled={busy}
               title="Start a fresh conversation"
@@ -3113,7 +3119,7 @@ function TypeInfoButton({ type }: { type: FieldObjectType }) {
             position: "absolute",
             top: "calc(100% + 6px)",
             left: 0,
-            minWidth: 260,
+            minWidth: "min(260px, calc(100vw - 24px))",
             maxWidth: 340,
             background: "var(--bg)",
             border: "1px solid var(--line)",
