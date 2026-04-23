@@ -62,6 +62,7 @@ export default function Page() {
   const [activeTeam, setActiveTeam] = useState<TeamSummary | null>(null);
   const [needsTeam, setNeedsTeam] = useState(false);
   const [teamPanel, setTeamPanel] = useState<"none" | "create" | "manage">("none");
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [members, setMembers] = useState<
     {
       id: string;
@@ -330,6 +331,7 @@ export default function Page() {
         onSwitch={(t) => setActiveTeam(t)}
         onCreate={() => setTeamPanel("create")}
         onManage={() => setTeamPanel("manage")}
+        onFeedback={() => setFeedbackOpen(true)}
         liveStatus={liveStatus}
         onSeed={runSeed}
         seeding={seeding}
@@ -417,6 +419,14 @@ export default function Page() {
         />
       )}
 
+      {feedbackOpen && (
+        <FeedbackModal
+          authedFetch={authedFetch}
+          userEmail={session.user.email ?? ""}
+          onClose={() => setFeedbackOpen(false)}
+        />
+      )}
+
       {loading && !state.goals.length && <div className="muted small" style={{ textAlign: "center", marginTop: 20 }}>Loading state…</div>}
     </div>
   );
@@ -434,6 +444,7 @@ function Topbar({
   onSwitch,
   onCreate,
   onManage,
+  onFeedback,
   liveStatus,
   onSeed,
   seeding,
@@ -445,6 +456,7 @@ function Topbar({
   onSwitch: (t: TeamSummary) => void;
   onCreate: () => void;
   onManage: () => void;
+  onFeedback: () => void;
   liveStatus: string;
   onSeed: () => void;
   seeding: boolean;
@@ -531,6 +543,9 @@ function Topbar({
             </div>
           )}
         </div>
+        <button className="btn-ghost small" onClick={onFeedback} title="Send platform feedback">
+          Feedback
+        </button>
         <span className="user small">{email}</span>
         <button className="btn-ghost small" onClick={onSignOut}>
           Sign out
@@ -755,7 +770,9 @@ function ManageTeamModal({
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"admin" | "member">("member");
   const [busy, setBusy] = useState(false);
+  const [sendingDigest, setSendingDigest] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [m, i] = await Promise.all([
@@ -780,6 +797,7 @@ function ManageTeamModal({
     e.preventDefault();
     setBusy(true);
     setErr(null);
+    setOk(null);
     try {
       const res = await authedFetch(`/api/v2/teams/${team.id}/invites`, {
         method: "POST",
@@ -798,6 +816,8 @@ function ManageTeamModal({
   };
 
   const revokeInvite = async (id: string) => {
+    setErr(null);
+    setOk(null);
     await authedFetch(`/api/v2/teams/${team.id}/invites?inviteId=${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
@@ -805,6 +825,8 @@ function ManageTeamModal({
   };
 
   const changeRole = async (memberId: string, nextRole: "owner" | "admin" | "member") => {
+    setErr(null);
+    setOk(null);
     await authedFetch(`/api/v2/teams/${team.id}/members`, {
       method: "PATCH",
       body: JSON.stringify({ memberId, role: nextRole }),
@@ -813,10 +835,36 @@ function ManageTeamModal({
   };
 
   const removeMember = async (memberId: string) => {
+    setErr(null);
+    setOk(null);
     await authedFetch(`/api/v2/teams/${team.id}/members?memberId=${encodeURIComponent(memberId)}`, {
       method: "DELETE",
     });
     await load();
+  };
+
+  const sendTaskDigest = async () => {
+    setSendingDigest(true);
+    setErr(null);
+    setOk(null);
+    try {
+      const res = await authedFetch(`/api/v2/teams/${team.id}/digest`, {
+        method: "POST",
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        sent?: number;
+        skipped?: number;
+        error?: string;
+      };
+      if (!res.ok) {
+        setErr(data.error ?? "Failed to send task emails.");
+        return;
+      }
+      setOk(`Sent ${data.sent ?? 0} emails${data.skipped ? `, skipped ${data.skipped}` : ""}.`);
+    } finally {
+      setSendingDigest(false);
+    }
   };
 
   const canAdmin = team.role === "owner" || team.role === "admin";
@@ -903,6 +951,21 @@ function ManageTeamModal({
 
           {canAdmin && (
             <>
+              <h4 style={{ marginTop: 18 }}>Email task digest</h4>
+              <p className="muted small" style={{ marginTop: 0 }}>
+                Sends each teammate their currently assigned items plus a link back to the site.
+              </p>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="btn-primary small"
+                  onClick={() => void sendTaskDigest()}
+                  disabled={sendingDigest}
+                >
+                  {sendingDigest ? "Sending…" : "Email everyone their tasks"}
+                </button>
+              </div>
+
               <h4 style={{ marginTop: 18 }}>Invite someone</h4>
               <form onSubmit={invite} className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                 <input
@@ -921,9 +984,11 @@ function ManageTeamModal({
                   Send
                 </button>
               </form>
-              {err && <div className="auth-error">{err}</div>}
             </>
           )}
+
+          {err && <div className="auth-error">{err}</div>}
+          {ok && <div className="auth-ok">{ok}</div>}
 
           {invites.length > 0 && (
             <>
@@ -3525,6 +3590,172 @@ function AuthGate({ supabase }: { supabase: ReturnType<typeof createSupabaseBrow
 
         {err && <div className="auth-error">{err}</div>}
         {ok && <div className="auth-ok">{ok}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
+// Feedback
+// ----------------------------------------------------------------------
+
+const PLATFORM_ADMIN_EMAIL = "maantech123@gmail.com";
+
+type FeedbackItem = {
+  id: string;
+  userId: string;
+  email: string | null;
+  message: string;
+  createdAt: string;
+};
+
+function FeedbackModal({
+  authedFetch,
+  userEmail,
+  onClose,
+}: {
+  authedFetch: AuthedFetch;
+  userEmail: string;
+  onClose: () => void;
+}) {
+  const isAdmin = userEmail.toLowerCase() === PLATFORM_ADMIN_EMAIL;
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+  const [items, setItems] = useState<FeedbackItem[]>([]);
+  const [loadingList, setLoadingList] = useState(false);
+
+  const loadAdmin = useCallback(async () => {
+    if (!isAdmin) return;
+    setLoadingList(true);
+    try {
+      const res = await authedFetch("/api/v2/feedback");
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setErr(data.error ?? "Failed to load feedback.");
+        return;
+      }
+      const data = (await res.json()) as { feedback: FeedbackItem[] };
+      setItems(data.feedback ?? []);
+    } finally {
+      setLoadingList(false);
+    }
+  }, [authedFetch, isAdmin]);
+
+  useEffect(() => {
+    void loadAdmin();
+  }, [loadAdmin]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    const text = message.trim();
+    if (!text) return;
+    setBusy(true);
+    setErr(null);
+    setOk(null);
+    try {
+      const res = await authedFetch("/api/v2/feedback", {
+        method: "POST",
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setErr(data.error ?? "Failed to submit.");
+        return;
+      }
+      setMessage("");
+      setOk("Thanks — your feedback was sent.");
+      if (isAdmin) await loadAdmin();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sheet-scrim" onClick={onClose}>
+      <div
+        className="sheet"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: "min(560px, calc(100vw - 16px))" }}
+      >
+        <div className="sheet-head">
+          <div className="title">{isAdmin ? "Platform feedback" : "Send feedback"}</div>
+          <button className="btn-ghost small" onClick={onClose}>Close</button>
+        </div>
+        <div className="sheet-body">
+          {!isAdmin && (
+            <p className="muted small" style={{ marginTop: 0 }}>
+              Tell us what&apos;s working, what&apos;s broken, or what you wish existed. Goes
+              straight to the platform admin.
+            </p>
+          )}
+
+          <form onSubmit={submit} className="stack" style={{ gap: 10 }}>
+            <textarea
+              placeholder="Your feedback…"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              rows={5}
+              maxLength={4000}
+              required
+              style={{ width: "100%", resize: "vertical" }}
+            />
+            <div className="sheet-actions">
+              <button type="button" className="btn-ghost" onClick={onClose} disabled={busy}>
+                Cancel
+              </button>
+              <button type="submit" className="btn-primary" disabled={busy || !message.trim()}>
+                {busy ? "Sending…" : "Send feedback"}
+              </button>
+            </div>
+          </form>
+          {err && <div className="auth-error">{err}</div>}
+          {ok && <div className="auth-ok">{ok}</div>}
+
+          {isAdmin && (
+            <div style={{ marginTop: 18 }}>
+              <div
+                className="muted small"
+                style={{ marginBottom: 8, display: "flex", justifyContent: "space-between" }}
+              >
+                <span>All submissions ({items.length})</span>
+                <button
+                  className="btn-ghost small"
+                  onClick={() => void loadAdmin()}
+                  disabled={loadingList}
+                >
+                  {loadingList ? "Loading…" : "Refresh"}
+                </button>
+              </div>
+              {!items.length && !loadingList && (
+                <div className="muted small">No feedback yet.</div>
+              )}
+              <div className="stack" style={{ gap: 8 }}>
+                {items.map((item) => (
+                  <div
+                    key={item.id}
+                    style={{
+                      border: "1px solid var(--line)",
+                      borderRadius: 10,
+                      padding: 10,
+                      background: "var(--bg)",
+                    }}
+                  >
+                    <div
+                      className="muted small"
+                      style={{ display: "flex", justifyContent: "space-between", gap: 8 }}
+                    >
+                      <span>{item.email ?? item.userId.slice(0, 8)}</span>
+                      <span>{formatRelative(item.createdAt)}</span>
+                    </div>
+                    <div style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{item.message}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
