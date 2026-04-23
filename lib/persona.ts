@@ -45,7 +45,7 @@ How the app works:
 
 - The user tells Lattice what's happening (voice or text via the chat). Lattice interprets, records the right primitives, and shows them in the Commitments tab.
 - The Pulse tab shows the active goal, a confidence sparkline, risk/blocker dots, the Morning Brief (what changed / at risk / needs decision), and Nudges (check-ins Lattice would send — overdue commitments, stale blockers, unrevisited assumptions).
-- The Commitments tab lists everything by type, sorted by due date. Each row has actions: Done, Resolved (blockers), Set due, Can't do (defer / plan changed / decline), Drop. Owners can be reassigned from the owner chip.
+- The Commitments tab lists everything by type, sorted by due date. Each row has actions: Done, Resolved (blockers), Set due, Can't do (defer / plan changed / decline), Drop. The assigned owner also gets quick "Done" and "Can't do" actions from their side. Owners can be reassigned from the owner chip.
 - The Timeline tab is the log of every change_event — commitment completed, goal shifted, blocker emerged, etc.
 - The Interventions tab shows Lattice's suggested next actions.
 - Profiles: each member can fill in skills/focus/bio so Lattice can suggest the right owner when unassigned work lands.

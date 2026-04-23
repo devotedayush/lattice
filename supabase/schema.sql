@@ -261,6 +261,14 @@ create table if not exists public.interventions (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.platform_feedback (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  email text,
+  message text not null,
+  created_at timestamptz not null default now()
+);
+
 -- ============================================================
 -- Shared functions + triggers
 -- ============================================================
@@ -328,6 +336,7 @@ create index if not exists assumptions_team_idx on public.assumptions(team_space
 create index if not exists dependencies_team_idx on public.dependencies(team_space_id);
 create index if not exists confidence_signals_target_idx on public.confidence_signals(team_space_id, target_id, created_at desc);
 create index if not exists interventions_team_idx on public.interventions(team_space_id, state, created_at desc);
+create index if not exists platform_feedback_created_idx on public.platform_feedback(created_at desc);
 
 -- ============================================================
 -- Membership helper + new-user trigger
@@ -373,6 +382,19 @@ create trigger on_auth_user_created_add_orgmind_member
 after insert on auth.users
 for each row execute function public.handle_new_orgmind_user();
 
+create or replace function public.is_platform_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(
+    (select lower(email) = 'maantech123@gmail.com' from auth.users where id = auth.uid()),
+    false
+  );
+$$;
+
 -- ============================================================
 -- Row-level security
 -- ============================================================
@@ -390,6 +412,7 @@ alter table public.assumptions enable row level security;
 alter table public.dependencies enable row level security;
 alter table public.confidence_signals enable row level security;
 alter table public.interventions enable row level security;
+alter table public.platform_feedback enable row level security;
 
 -- V1 policies
 
@@ -558,6 +581,24 @@ to authenticated with check (public.is_orgmind_team_member(team_space_id));
 drop policy if exists interventions_member_update on public.interventions;
 create policy interventions_member_update on public.interventions for update
 to authenticated using (public.is_orgmind_team_member(team_space_id));
+
+-- Platform feedback policies
+
+drop policy if exists platform_feedback_self_insert on public.platform_feedback;
+create policy platform_feedback_self_insert on public.platform_feedback for insert
+to authenticated with check (user_id = auth.uid());
+
+drop policy if exists platform_feedback_self_read on public.platform_feedback;
+create policy platform_feedback_self_read on public.platform_feedback for select
+to authenticated using (user_id = auth.uid());
+
+drop policy if exists platform_feedback_admin_read on public.platform_feedback;
+create policy platform_feedback_admin_read on public.platform_feedback for select
+to authenticated using (public.is_platform_admin());
+
+drop policy if exists platform_feedback_admin_delete on public.platform_feedback;
+create policy platform_feedback_admin_delete on public.platform_feedback for delete
+to authenticated using (public.is_platform_admin());
 
 -- ============================================================
 -- Seed data (demo team space)

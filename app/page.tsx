@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { Session } from "@supabase/supabase-js";
 
+import { isPlatformAdminEmail } from "@/lib/platform-admin";
 import { createSupabaseBrowserClient } from "@/lib/supabase";
 import {
   accentForChangeKind,
@@ -59,10 +60,11 @@ export default function Page() {
   const [chatPrefill, setChatPrefill] = useState<{ text: string; at: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [teams, setTeams] = useState<TeamSummary[]>([]);
-  const [activeTeam, setActiveTeam] = useState<TeamSummary | null>(null);
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(null);
   const [needsTeam, setNeedsTeam] = useState(false);
   const [teamPanel, setTeamPanel] = useState<"none" | "create" | "manage">("none");
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const [members, setMembers] = useState<
     {
       id: string;
@@ -78,7 +80,9 @@ export default function Page() {
   const [analyzing, setAnalyzing] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [liveStatus, setLiveStatus] = useState<string>("watching");
+  const isPlatformAdmin = isPlatformAdminEmail(session?.user.email);
   const [updatedIds, setUpdatedIds] = useState<Set<string>>(new Set());
+  const loadStateRequest = useRef(0);
   const markUpdated = useCallback((ids: string[]) => {
     if (!ids.length) return;
     setUpdatedIds((prev) => {
@@ -140,33 +144,37 @@ export default function Page() {
     const res = await authedFetch("/api/v2/teams");
     if (!res.ok) return;
     const data = (await res.json()) as { teams: TeamSummary[] };
-    setTeams(data.teams ?? []);
-    if (!data.teams?.length) {
+    const nextTeams = data.teams ?? [];
+    setTeams(nextTeams);
+    if (!nextTeams.length) {
       setNeedsTeam(true);
-      setActiveTeam(null);
+      setActiveTeamId(null);
     } else {
       setNeedsTeam(false);
-      setActiveTeam((prev) => prev ?? data.teams[0]);
+      setActiveTeamId((prev) => (prev && nextTeams.some((team) => team.id === prev) ? prev : nextTeams[0].id));
     }
   }, [authedFetch, session]);
 
   const loadState = useCallback(
     async (teamId?: string) => {
       if (!session) return;
-      const tid = teamId ?? activeTeam?.id;
+      const tid = teamId ?? activeTeamId;
       if (!tid) return;
+      const requestId = ++loadStateRequest.current;
       try {
         setLoading(true);
         const res = await authedFetch(`/api/v2/state?team=${encodeURIComponent(tid)}`);
         if (!res.ok) return;
         const data = (await res.json()) as { state: LatticeState | null; team: TeamSummary | null };
+        if (loadStateRequest.current !== requestId) return;
         if (data.state) setState(data.state);
-        if (data.team) setActiveTeam(data.team);
       } finally {
-        setLoading(false);
+        if (loadStateRequest.current === requestId) {
+          setLoading(false);
+        }
       }
     },
-    [authedFetch, session, activeTeam?.id],
+    [authedFetch, session, activeTeamId],
   );
 
   useEffect(() => {
@@ -174,12 +182,19 @@ export default function Page() {
   }, [session, loadTeams]);
 
   useEffect(() => {
-    if (session && activeTeam) void loadState(activeTeam.id);
-  }, [session, activeTeam, loadState]);
+    if (session && activeTeamId) void loadState(activeTeamId);
+  }, [session, activeTeamId, loadState]);
+
+  // Clear team-scoped UI immediately so switching teams never shows stale content.
+  useEffect(() => {
+    setState(emptyLatticeState);
+    setMembers([]);
+    setUpdatedIds(new Set());
+  }, [activeTeamId]);
 
   // Load members for the active team so we can power the reassign dropdown.
   useEffect(() => {
-    if (!session || !activeTeam) {
+    if (!session || !activeTeamId) {
       setMembers([]);
       return;
     }
@@ -187,7 +202,7 @@ export default function Page() {
     (async () => {
       try {
         const res = await authedFetch(
-          `/api/v2/teams/${encodeURIComponent(activeTeam.id)}/members`,
+          `/api/v2/teams/${encodeURIComponent(activeTeamId)}/members`,
         );
         if (!res.ok) return;
         const data = (await res.json()) as {
@@ -201,44 +216,48 @@ export default function Page() {
     return () => {
       cancelled = true;
     };
-  }, [session, activeTeam, authedFetch]);
+  }, [session, activeTeamId, authedFetch]);
 
   // Supabase realtime: refresh state when anything in this team changes
   useEffect(() => {
-    if (!supabase || !activeTeam) return;
+    if (!supabase || !activeTeamId) return;
     const bump = (payload: { new?: { id?: string }; old?: { id?: string } }) => {
       const id = payload?.new?.id ?? payload?.old?.id;
       if (id) markUpdated([id]);
-      void loadState(activeTeam.id);
+      void loadState(activeTeamId);
     };
     const channel = supabase
-      .channel(`lattice-${activeTeam.id}`)
+      .channel(`lattice-${activeTeamId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "change_events", filter: `team_space_id=eq.${activeTeam.id}` },
+        { event: "*", schema: "public", table: "change_events", filter: `team_space_id=eq.${activeTeamId}` },
         bump,
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "interventions", filter: `team_space_id=eq.${activeTeam.id}` },
+        { event: "*", schema: "public", table: "interventions", filter: `team_space_id=eq.${activeTeamId}` },
         bump,
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "goals", filter: `team_space_id=eq.${activeTeam.id}` },
+        { event: "*", schema: "public", table: "goals", filter: `team_space_id=eq.${activeTeamId}` },
         bump,
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "field_objects", filter: `team_space_id=eq.${activeTeam.id}` },
+        { event: "*", schema: "public", table: "field_objects", filter: `team_space_id=eq.${activeTeamId}` },
         bump,
       )
       .subscribe();
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [supabase, activeTeam, loadState, markUpdated]);
+  }, [supabase, activeTeamId, loadState, markUpdated]);
 
+  const activeTeam = useMemo(
+    () => teams.find((team) => team.id === activeTeamId) ?? null,
+    [teams, activeTeamId],
+  );
   const teamId = activeTeam?.id;
 
   const runSimulate = async () => {
@@ -325,12 +344,14 @@ export default function Page() {
     <div className="shell">
       <Topbar
         email={session.user.email ?? ""}
+        isPlatformAdmin={isPlatformAdmin}
         onSignOut={() => supabase?.auth.signOut()}
         teams={teams}
         activeTeam={activeTeam}
-        onSwitch={(t) => setActiveTeam(t)}
+        onSwitch={(t) => setActiveTeamId(t.id)}
         onCreate={() => setTeamPanel("create")}
         onManage={() => setTeamPanel("manage")}
+        onAdmin={() => setAdminOpen(true)}
         onFeedback={() => setFeedbackOpen(true)}
         liveStatus={liveStatus}
         onSeed={runSeed}
@@ -404,7 +425,7 @@ export default function Page() {
           onClose={() => setTeamPanel("none")}
           onCreated={async (t) => {
             await loadTeams();
-            setActiveTeam(t);
+            setActiveTeamId(t.id);
             setTeamPanel("none");
           }}
         />
@@ -427,6 +448,13 @@ export default function Page() {
         />
       )}
 
+      {adminOpen && isPlatformAdmin && (
+        <AdminDashboardModal
+          authedFetch={authedFetch}
+          onClose={() => setAdminOpen(false)}
+        />
+      )}
+
       {loading && !state.goals.length && <div className="muted small" style={{ textAlign: "center", marginTop: 20 }}>Loading state…</div>}
     </div>
   );
@@ -438,24 +466,28 @@ export default function Page() {
 
 function Topbar({
   email,
+  isPlatformAdmin,
   onSignOut,
   teams,
   activeTeam,
   onSwitch,
   onCreate,
   onManage,
+  onAdmin,
   onFeedback,
   liveStatus,
   onSeed,
   seeding,
 }: {
   email: string;
+  isPlatformAdmin: boolean;
   onSignOut: () => void;
   teams: TeamSummary[];
   activeTeam: TeamSummary | null;
   onSwitch: (t: TeamSummary) => void;
   onCreate: () => void;
   onManage: () => void;
+  onAdmin: () => void;
   onFeedback: () => void;
   liveStatus: string;
   onSeed: () => void;
@@ -473,6 +505,11 @@ function Topbar({
         {activeTeam?.role === "owner" && (
           <button className="btn-ghost small" onClick={onSeed} disabled={seeding} title="Wipe + load a rich demo story">
             {seeding ? "Loading…" : "Load demo"}
+          </button>
+        )}
+        {isPlatformAdmin && (
+          <button className="btn-ghost small" onClick={onAdmin}>
+            Admin
           </button>
         )}
         <div className="team-switch" style={{ position: "relative" }}>
@@ -1680,6 +1717,7 @@ function CommitmentsView({
                 onRespond={respond}
                 flash={updatedIds.has(f.id)}
                 canMutate={canMutate(f)}
+                currentMemberName={activeTeam?.memberName ?? null}
                 members={members}
               />
             ))}
@@ -1722,6 +1760,7 @@ function CommitmentRow({
   onRespond,
   flash,
   canMutate = true,
+  currentMemberName,
   members = [],
 }: {
   f: FieldObject;
@@ -1736,6 +1775,7 @@ function CommitmentRow({
   ) => Promise<void>;
   flash?: boolean;
   canMutate?: boolean;
+  currentMemberName?: string | null;
   members?: { id: string; name: string; role: string; email?: string | null; skills?: string[]; focus?: string | null; bio?: string | null }[];
 }) {
   const confClass = f.confidence < 0.4 ? "low" : f.confidence < 0.7 ? "mid" : "";
@@ -1744,6 +1784,12 @@ function CommitmentRow({
   const [respondOpen, setRespondOpen] = useState(false);
   const [dueOpen, setDueOpen] = useState(false);
   const closed = f.status === "done" || f.status === "resolved" || f.status === "dropped";
+  const ownedByMe = Boolean(
+    canMutate &&
+      currentMemberName &&
+      f.owner &&
+      f.owner.trim().toLowerCase() === currentMemberName.trim().toLowerCase(),
+  );
   const dueMeta = fmtDueMeta(f.dueAt);
   const deferredActive = (() => {
     if (!f.deferredUntil) return null;
@@ -1799,6 +1845,7 @@ function CommitmentRow({
           ) : (
             f.owner && <span>{f.owner}</span>
           )}
+          {ownedByMe && <span className="muted">· assigned to you</span>}
           {f.status && <span>· {f.status}</span>}
           {dueMeta && (
             <span
@@ -1919,9 +1966,34 @@ function CommitmentRow({
           <div className={`fill ${confClass}`} style={{ width: `${f.confidence * 100}%` }} />
         </div>
         {!closed && canMutate && (f.type === "promise" || f.type === "request") && (
-          <button className="btn-ghost small" disabled={busy} onClick={() => click("complete")}>
-            Done
-          </button>
+          <>
+            {ownedByMe ? (
+              <>
+                <button className="btn-ghost small" disabled={busy} onClick={() => click("complete")}>
+                  Done
+                </button>
+                {onRespond && (
+                  <button
+                    className="btn-ghost small"
+                    disabled={busy}
+                    onClick={() => {
+                      setBusy(true);
+                      void onRespond(f.id, "decline", "Can't do it from my side").finally(() =>
+                        setBusy(false),
+                      );
+                    }}
+                    title="Mark this as something you can't take on"
+                  >
+                    Can&apos;t do
+                  </button>
+                )}
+              </>
+            ) : (
+              <button className="btn-ghost small" disabled={busy} onClick={() => click("complete")}>
+                Done
+              </button>
+            )}
+          </>
         )}
         {!closed && canMutate && f.type === "blocker" && (
           <button className="btn-ghost small" disabled={busy} onClick={() => click("resolve")}>
@@ -1955,7 +2027,7 @@ function CommitmentRow({
             )}
           </div>
         )}
-        {!closed && canMutate && onRespond && (f.type === "promise" || f.type === "request") && (
+        {!closed && canMutate && onRespond && !ownedByMe && (f.type === "promise" || f.type === "request") && (
           <div style={{ position: "relative" }}>
             <button
               className="btn-ghost small"
@@ -2009,6 +2081,12 @@ function fmtDueMeta(dueAt?: string): { label: string; late: boolean } | null {
   return { label: `due in ${days}d`, late: false };
 }
 
+function futureDateInput(daysFromNow: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + daysFromNow);
+  return date.toISOString().slice(0, 10);
+}
+
 function DuePicker({
   current,
   onPick,
@@ -2020,7 +2098,7 @@ function DuePicker({
 }) {
   const defaultDate = current
     ? new Date(current).toISOString().slice(0, 10)
-    : new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    : futureDateInput(1);
   const [date, setDate] = useState(defaultDate);
   const quick = [
     { label: "Today", days: 0 },
@@ -2105,9 +2183,7 @@ function RespondPopover({
 }) {
   const [mode, setMode] = useState<"decline" | "defer" | "scope_change">("defer");
   const [reason, setReason] = useState("");
-  const [until, setUntil] = useState(
-    new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10),
-  );
+  const [until, setUntil] = useState(() => futureDateInput(3));
   const submit = async () => {
     if (mode === "defer") {
       const [y, m, d] = until.split("-").map(Number);
@@ -3599,8 +3675,6 @@ function AuthGate({ supabase }: { supabase: ReturnType<typeof createSupabaseBrow
 // Feedback
 // ----------------------------------------------------------------------
 
-const PLATFORM_ADMIN_EMAIL = "maantech123@gmail.com";
-
 type FeedbackItem = {
   id: string;
   userId: string;
@@ -3608,6 +3682,473 @@ type FeedbackItem = {
   message: string;
   createdAt: string;
 };
+
+type AdminOverview = {
+  generatedAt: string;
+  overview: {
+    teams: number;
+    memberRows: number;
+    uniqueUsers: number;
+    updatesLast14d: number;
+    openPromises: number;
+    blockers: number;
+    avgHealthScore: number;
+    avgConfidence: number;
+    pendingInvites: number;
+    teamsAtRisk: number;
+    feedbackCount: number;
+  };
+  activity14d: { day: string; updates: number }[];
+  interventionStates: {
+    suggested: number;
+    accepted: number;
+    acted: number;
+    dismissed: number;
+  };
+  healthDistribution: {
+    healthy: number;
+    watch: number;
+    "at-risk": number;
+    critical: number;
+  };
+  teamSnapshots: Array<{
+    id: string;
+    name: string;
+    activeIntent: string;
+    memberCount: number;
+    ownerCount: number;
+    adminCount: number;
+    openPromises: number;
+    blockers: number;
+    atRiskPromises: number;
+    avgConfidence: number;
+    recentChanges7d: number;
+    suggestedInterventions: number;
+    acceptedInterventions: number;
+    actedInterventions: number;
+    pendingInvites: number;
+    healthScore: number;
+    healthStatus: "healthy" | "watch" | "at-risk" | "critical";
+    activeGoal: { title: string; confidence: number } | null;
+    lastActivityAt: string | null;
+  }>;
+  recentActivity: Array<{
+    teamId: string;
+    teamName: string;
+    kind: string;
+    summary: string;
+    createdAt: string;
+  }>;
+  recentFeedback: Array<{
+    id: string;
+    email: string | null;
+    message: string;
+    createdAt: string;
+  }>;
+};
+
+function healthTone(status: AdminOverview["teamSnapshots"][number]["healthStatus"]) {
+  if (status === "critical") return { label: "Critical", fg: "#8a2f16", bg: "#fde6dc" };
+  if (status === "at-risk") return { label: "At risk", fg: "#9a5b09", bg: "#fff0cc" };
+  if (status === "watch") return { label: "Watch", fg: "#355b73", bg: "#e5f0f8" };
+  return { label: "Healthy", fg: "#22604a", bg: "#dff5ea" };
+}
+
+function AdminDashboardModal({
+  authedFetch,
+  onClose,
+}: {
+  authedFetch: AuthedFetch;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<AdminOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const res = await authedFetch("/api/v2/admin/overview");
+      const payload = (await res.json().catch(() => ({}))) as AdminOverview & { error?: string };
+      if (!res.ok) {
+        setErr(payload.error ?? "Failed to load admin dashboard.");
+        return;
+      }
+      setData(payload);
+    } finally {
+      setLoading(false);
+    }
+  }, [authedFetch]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const maxActivity = Math.max(...(data?.activity14d.map((item) => item.updates) ?? [1]), 1);
+  const healthTotal = data
+    ? Object.values(data.healthDistribution).reduce((sum, count) => sum + count, 0)
+    : 0;
+  const interventionTotal = data
+    ? Object.values(data.interventionStates).reduce((sum, count) => sum + count, 0)
+    : 0;
+
+  return (
+    <div className="sheet-scrim" onClick={onClose}>
+      <div
+        className="sheet"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: "min(1120px, calc(100vw - 16px))", maxHeight: "calc(100vh - 24px)" }}
+      >
+        <div className="sheet-head">
+          <div>
+            <div className="title">Admin dashboard</div>
+            {data?.generatedAt && (
+              <div className="muted small">Updated {formatRelative(data.generatedAt)}</div>
+            )}
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn-ghost small" onClick={() => void load()} disabled={loading}>
+              {loading ? "Loading…" : "Refresh"}
+            </button>
+            <button className="btn-ghost small" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div className="sheet-body" style={{ overflow: "auto" }}>
+          {err && <div className="auth-error">{err}</div>}
+          {!err && !data && loading && <div className="muted small">Loading platform analytics…</div>}
+
+          {data && (
+            <div className="stack" style={{ gap: 16 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                  gap: 10,
+                }}
+              >
+                <AdminKpi label="Teams" value={String(data.overview.teams)} note={`${data.overview.teamsAtRisk} need attention`} />
+                <AdminKpi label="People" value={String(data.overview.uniqueUsers)} note={`${data.overview.memberRows} memberships`} />
+                <AdminKpi label="Updates" value={String(data.overview.updatesLast14d)} note="last 14 days" />
+                <AdminKpi label="Open work" value={String(data.overview.openPromises)} note={`${data.overview.blockers} blockers`} />
+                <AdminKpi label="Health" value={`${data.overview.avgHealthScore}`} note={`${Math.round(data.overview.avgConfidence * 100)}% confidence`} />
+                <AdminKpi label="Invites" value={String(data.overview.pendingInvites)} note={`${data.overview.feedbackCount} feedback notes`} />
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1.5fr) minmax(280px, 0.9fr)",
+                  gap: 12,
+                }}
+              >
+                <section className="section" style={{ margin: 0 }}>
+                  <div className="section-head">
+                    <h2 className="section-title">Activity trend</h2>
+                    <span className="section-meta">Change events per day</span>
+                  </div>
+                  <svg viewBox="0 0 640 220" style={{ width: "100%", height: 220, display: "block" }}>
+                    <line x1="28" y1="184" x2="620" y2="184" stroke="var(--line)" strokeWidth="1" />
+                    {data.activity14d.map((item, index) => {
+                      const x = 40 + index * 42;
+                      const barHeight = Math.max(6, (item.updates / maxActivity) * 126);
+                      const y = 184 - barHeight;
+                      const label = item.day.slice(5);
+                      return (
+                        <g key={item.day}>
+                          <rect x={x} y={y} width="24" height={barHeight} rx="8" fill="#355b73" opacity="0.88" />
+                          <text x={x + 12} y={198} textAnchor="middle" fontSize="10" fill="var(--muted)">
+                            {label}
+                          </text>
+                          <text x={x + 12} y={y - 8} textAnchor="middle" fontSize="10" fill="#355b73">
+                            {item.updates}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                </section>
+
+                <section className="section" style={{ margin: 0 }}>
+                  <div className="section-head">
+                    <h2 className="section-title">Health mix</h2>
+                    <span className="section-meta">Across all teams</span>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                      gap: 6,
+                      marginBottom: 12,
+                    }}
+                  >
+                    {[
+                      ["healthy", "#2d7c61"],
+                      ["watch", "#3f6f8f"],
+                      ["at-risk", "#c98311"],
+                      ["critical", "#c4512d"],
+                    ].map(([key, color]) => {
+                      const count = data.healthDistribution[key as keyof typeof data.healthDistribution];
+                      const width = healthTotal ? (count / healthTotal) * 100 : 0;
+                      return (
+                        <div key={key}>
+                          <div className="small muted" style={{ marginBottom: 4, textTransform: "capitalize" }}>
+                            {key}
+                          </div>
+                          <div
+                            style={{
+                              height: 10,
+                              borderRadius: 999,
+                              background: "var(--line-soft, #f2f1ee)",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div style={{ width: `${width}%`, height: "100%", background: color }} />
+                          </div>
+                          <div style={{ marginTop: 6, fontWeight: 600 }}>{count}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="small muted" style={{ marginBottom: 8 }}>
+                    Intervention pipeline
+                  </div>
+                  <div className="stack" style={{ gap: 8 }}>
+                    {[
+                      ["suggested", "#768fa3"],
+                      ["accepted", "#4a7b68"],
+                      ["acted", "#2d7c61"],
+                      ["dismissed", "#a0745b"],
+                    ].map(([key, color]) => {
+                      const count = data.interventionStates[key as keyof typeof data.interventionStates];
+                      const width = interventionTotal ? (count / interventionTotal) * 100 : 0;
+                      return (
+                        <div key={key}>
+                          <div
+                            className="small"
+                            style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}
+                          >
+                            <span style={{ textTransform: "capitalize" }}>{key}</span>
+                            <span className="muted">{count}</span>
+                          </div>
+                          <div
+                            style={{
+                              height: 10,
+                              borderRadius: 999,
+                              background: "var(--line-soft, #f2f1ee)",
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div style={{ width: `${width}%`, height: "100%", background: color }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              </div>
+
+              <section className="section" style={{ margin: 0 }}>
+                <div className="section-head">
+                  <h2 className="section-title">Team watchlist</h2>
+                  <span className="section-meta">Lowest health first</span>
+                </div>
+                <div className="stack" style={{ gap: 10 }}>
+                  {data.teamSnapshots.map((team) => {
+                    const tone = healthTone(team.healthStatus);
+                    return (
+                      <div
+                        key={team.id}
+                        style={{
+                          border: "1px solid var(--line)",
+                          borderRadius: 14,
+                          padding: 12,
+                          background: "var(--bg)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "minmax(0, 1.6fr) minmax(280px, 1fr)",
+                            gap: 14,
+                            alignItems: "start",
+                          }}
+                        >
+                          <div>
+                            <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                              <div>
+                                <div style={{ fontWeight: 700 }}>{team.name}</div>
+                                <div className="small muted" style={{ marginTop: 2 }}>
+                                  {team.activeGoal?.title ?? team.activeIntent}
+                                </div>
+                              </div>
+                              <span
+                                className="small"
+                                style={{
+                                  background: tone.bg,
+                                  color: tone.fg,
+                                  borderRadius: 999,
+                                  padding: "4px 8px",
+                                  fontWeight: 700,
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {tone.label}
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                marginTop: 10,
+                                height: 10,
+                                borderRadius: 999,
+                                background: "var(--line-soft, #f2f1ee)",
+                                overflow: "hidden",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: `${team.healthScore}%`,
+                                  height: "100%",
+                                  background:
+                                    team.healthStatus === "critical"
+                                      ? "#c4512d"
+                                      : team.healthStatus === "at-risk"
+                                        ? "#c98311"
+                                        : team.healthStatus === "watch"
+                                          ? "#4f7c9a"
+                                          : "#2d7c61",
+                                }}
+                              />
+                            </div>
+                            <div className="small muted" style={{ marginTop: 8 }}>
+                              Score {team.healthScore} · {team.recentChanges7d} updates in 7d
+                              {team.lastActivityAt ? ` · active ${formatRelative(team.lastActivityAt)}` : ""}
+                            </div>
+                          </div>
+
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                              gap: 10,
+                            }}
+                          >
+                            <AdminMetric label="Members" value={String(team.memberCount)} />
+                            <AdminMetric label="Open work" value={String(team.openPromises)} />
+                            <AdminMetric label="Blockers" value={String(team.blockers)} />
+                            <AdminMetric label="At risk" value={String(team.atRiskPromises)} />
+                            <AdminMetric label="Confidence" value={`${Math.round(team.avgConfidence * 100)}%`} />
+                            <AdminMetric label="Pending invites" value={String(team.pendingInvites)} />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)",
+                  gap: 12,
+                }}
+              >
+                <section className="section" style={{ margin: 0 }}>
+                  <div className="section-head">
+                    <h2 className="section-title">Recent activity</h2>
+                    <span className="section-meta">Across the platform</span>
+                  </div>
+                  <div className="timeline">
+                    {data.recentActivity.map((item) => (
+                      <div key={`${item.teamId}-${item.createdAt}-${item.summary}`} className="timeline-item">
+                        <div className="timeline-glyph">•</div>
+                        <div className="timeline-body">
+                          <div className="timeline-title">{item.summary}</div>
+                          <div className="timeline-meta">
+                            <span>{item.teamName}</span>
+                            <span>· {item.kind.replaceAll("_", " ")}</span>
+                            <span>· {formatRelative(item.createdAt)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="section" style={{ margin: 0 }}>
+                  <div className="section-head">
+                    <h2 className="section-title">Feedback inbox</h2>
+                    <span className="section-meta">{data.recentFeedback.length} latest notes</span>
+                  </div>
+                  <div className="stack" style={{ gap: 8 }}>
+                    {data.recentFeedback.length === 0 && (
+                      <div className="muted small">No feedback yet.</div>
+                    )}
+                    {data.recentFeedback.map((item) => (
+                      <div
+                        key={item.id}
+                        style={{
+                          border: "1px solid var(--line)",
+                          borderRadius: 12,
+                          padding: 10,
+                          background: "var(--bg)",
+                        }}
+                      >
+                        <div
+                          className="small muted"
+                          style={{ display: "flex", justifyContent: "space-between", gap: 8 }}
+                        >
+                          <span>{item.email ?? "Unknown user"}</span>
+                          <span>{formatRelative(item.createdAt)}</span>
+                        </div>
+                        <div style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{item.message}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminKpi({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--line)",
+        borderRadius: 14,
+        padding: 12,
+        background: "linear-gradient(180deg, rgba(255,255,255,0.9), rgba(247,246,242,0.9))",
+      }}
+    >
+      <div className="small muted">{label}</div>
+      <div style={{ fontSize: 28, lineHeight: 1.1, fontWeight: 800, marginTop: 6 }}>{value}</div>
+      <div className="small muted" style={{ marginTop: 4 }}>{note}</div>
+    </div>
+  );
+}
+
+function AdminMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--line)",
+        borderRadius: 12,
+        padding: 10,
+        background: "var(--line-soft, #f6f4f1)",
+      }}
+    >
+      <div className="small muted">{label}</div>
+      <div style={{ marginTop: 4, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
 
 function FeedbackModal({
   authedFetch,
@@ -3618,7 +4159,7 @@ function FeedbackModal({
   userEmail: string;
   onClose: () => void;
 }) {
-  const isAdmin = userEmail.toLowerCase() === PLATFORM_ADMIN_EMAIL;
+  const isAdmin = isPlatformAdminEmail(userEmail);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);

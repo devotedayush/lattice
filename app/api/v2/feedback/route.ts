@@ -1,15 +1,51 @@
 import { NextResponse } from "next/server";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
+import { isEmailConfigured, sendEmail } from "@/lib/email";
+import { isPlatformAdminEmail, PLATFORM_ADMIN_EMAIL } from "@/lib/platform-admin";
 
-const ADMIN_EMAIL = "maantech123@gmail.com";
+type SupabaseError = {
+  code?: string;
+  message?: string;
+};
+
+function isMissingFeedbackTable(error: SupabaseError) {
+  return error.code === "PGRST205" || error.message?.includes("platform_feedback");
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+async function emailFeedbackFallback(params: { message: string; userEmail: string | null }) {
+  if (!isEmailConfigured()) {
+    return false;
+  }
+
+  const fromLabel = params.userEmail ?? "Unknown user";
+  await sendEmail({
+    to: PLATFORM_ADMIN_EMAIL,
+    subject: "New Orgmind feedback",
+    text: `Feedback from ${fromLabel}\n\n${params.message}`,
+    html: `
+      <p><strong>Feedback from:</strong> ${escapeHtml(fromLabel)}</p>
+      <p style="white-space: pre-wrap;">${escapeHtml(params.message)}</p>
+    `,
+  });
+  return true;
+}
 
 export async function GET(request: Request) {
   const auth = await requireUserSupabaseClient(request);
   if ("error" in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status });
   }
-  const isAdmin = (auth.user.email ?? "").toLowerCase() === ADMIN_EMAIL;
+  const isAdmin = isPlatformAdminEmail(auth.user.email);
   if (!isAdmin) {
     return NextResponse.json({ error: "Forbidden." }, { status: 403 });
   }
@@ -56,6 +92,23 @@ export async function POST(request: Request) {
     message,
   });
   if (error) {
+    if (isMissingFeedbackTable(error)) {
+      try {
+        const emailed = await emailFeedbackFallback({ message, userEmail: auth.user.email ?? null });
+        if (emailed) {
+          console.warn("/api/v2/feedback POST used email fallback because platform_feedback is missing.");
+          return NextResponse.json({ ok: true, delivery: "email" });
+        }
+      } catch (emailError) {
+        console.error("/api/v2/feedback fallback email", emailError);
+      }
+
+      return NextResponse.json(
+        { error: "Feedback storage is not set up yet. Apply the platform feedback migration." },
+        { status: 503 },
+      );
+    }
+
     console.error("/api/v2/feedback POST", error);
     return NextResponse.json({ error: "Failed to submit feedback." }, { status: 500 });
   }

@@ -29,10 +29,12 @@ NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 LATTICE_TEAM_SPACE_ID=demo-team-space
+APP_BASE_URL=https://lattice-opal.vercel.app
 ```
 
 Without `OPENAI_API_KEY`, text interpretation uses a local fallback parser so the prototype still works.
 Without `SUPABASE_SERVICE_ROLE_KEY`, the demo uses the public anon key and the RLS policies in `supabase/schema.sql`.
+Set `APP_BASE_URL` to `http://localhost:3000` for local development; production emails should use `https://lattice-opal.vercel.app`.
 
 ## V1 Surface
 
