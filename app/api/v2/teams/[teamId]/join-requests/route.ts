@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireUserSupabaseClient } from "@/lib/auth-server";
+import { createSupabaseServiceClient } from "@/lib/supabase";
 import { listJoinRequests, reviewJoinRequest } from "@/lib/teams";
 
 export async function GET(request: Request, { params }: { params: Promise<{ teamId: string }> }) {
@@ -32,8 +33,29 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ te
     return NextResponse.json({ error: "joinRequestId and action required." }, { status: 400 });
   }
 
+  const { data: membership, error: membershipError } = await auth.supabase
+    .from("team_members")
+    .select("role")
+    .eq("team_space_id", teamId)
+    .eq("user_id", auth.user.id)
+    .maybeSingle();
+  if (membershipError) {
+    return NextResponse.json({ error: "Failed to verify admin access." }, { status: 500 });
+  }
+  if (!membership || (membership.role !== "owner" && membership.role !== "admin")) {
+    return NextResponse.json({ error: "Only team owners or admins can review join requests." }, { status: 403 });
+  }
+
+  const admin = createSupabaseServiceClient();
+  if (!admin) {
+    return NextResponse.json(
+      { error: "Server misconfigured: SUPABASE_SERVICE_ROLE_KEY missing." },
+      { status: 500 },
+    );
+  }
+
   try {
-    await reviewJoinRequest(auth.supabase, auth.user, {
+    await reviewJoinRequest(admin, auth.user, {
       teamSpaceId: teamId,
       joinRequestId: body.joinRequestId,
       action: body.action,

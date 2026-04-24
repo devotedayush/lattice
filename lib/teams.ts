@@ -67,6 +67,227 @@ export type JoinLinkTeam = {
   teamName: string;
 };
 
+const JOIN_REQUEST_TOKEN_PREFIX = "joinreq:";
+
+function isMissingJoinRequestsTable(error: { code?: string; message?: string } | null | undefined) {
+  return error?.code === "42P01" || error?.message?.includes("team_join_requests");
+}
+
+function buildJoinRequestToken(userId: string): string {
+  return `${JOIN_REQUEST_TOKEN_PREFIX}${userId}:${generateInviteToken()}`;
+}
+
+function parseJoinRequestUserId(token: string | null | undefined): string | null {
+  if (!token?.startsWith(JOIN_REQUEST_TOKEN_PREFIX)) return null;
+  const [prefix, userId] = token.split(":");
+  if (prefix !== JOIN_REQUEST_TOKEN_PREFIX.slice(0, -1) || !userId) return null;
+  return userId;
+}
+
+async function createJoinRequestFallback(
+  supabase: SupabaseClient,
+  user: User,
+  params: { team: JoinLinkTeam; message?: string | null },
+): Promise<{ request: TeamJoinRequest; team: JoinLinkTeam; alreadyMember?: boolean }> {
+  const email = user.email?.trim().toLowerCase();
+  if (!email) throw new Error("Your account needs an email before you can request access.");
+
+  const { data: existingRequest, error: existingRequestError } = await supabase
+    .from("team_invitations")
+    .select("id, email, state, token, created_at")
+    .eq("team_space_id", params.team.teamSpaceId)
+    .eq("email", email)
+    .like("token", `${JOIN_REQUEST_TOKEN_PREFIX}%`)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existingRequestError) throw existingRequestError;
+
+  if (existingRequest?.state === "pending") {
+    throw new Error("You already have a pending request for this team.");
+  }
+
+  const token = buildJoinRequestToken(user.id);
+  const createdAt = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  if (existingRequest?.id) {
+    const { error } = await supabase
+      .from("team_invitations")
+      .update({
+        email,
+        token,
+        role: "member" as TeamRole,
+        state: "pending" as InviteState,
+        invited_by: user.id,
+        accepted_by: null,
+        expires_at: expiresAt,
+      })
+      .eq("id", existingRequest.id);
+    if (error) throw error;
+
+    return {
+      team: params.team,
+      request: {
+        id: existingRequest.id,
+        teamSpaceId: params.team.teamSpaceId,
+        userId: user.id,
+        name: (user.user_metadata?.name as string | undefined) ?? user.email ?? null,
+        email,
+        message: params.message?.trim() || null,
+        state: "pending",
+        createdAt: existingRequest.created_at ?? createdAt,
+      },
+    };
+  }
+
+  const requestId = `join-${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const { error } = await supabase.from("team_invitations").insert({
+    id: requestId,
+    team_space_id: params.team.teamSpaceId,
+    email,
+    token,
+    role: "member" as TeamRole,
+    state: "pending" as InviteState,
+    invited_by: user.id,
+    expires_at: expiresAt,
+  });
+  if (error) throw error;
+
+  return {
+    team: params.team,
+    request: {
+      id: requestId,
+      teamSpaceId: params.team.teamSpaceId,
+      userId: user.id,
+      name: (user.user_metadata?.name as string | undefined) ?? user.email ?? null,
+      email,
+      message: params.message?.trim() || null,
+      state: "pending",
+      createdAt,
+    },
+  };
+}
+
+async function listJoinRequestsFallback(
+  supabase: SupabaseClient,
+  teamSpaceId: string,
+): Promise<TeamJoinRequest[]> {
+  const { data, error } = await supabase
+    .from("team_invitations")
+    .select("id, team_space_id, email, state, token, created_at")
+    .eq("team_space_id", teamSpaceId)
+    .eq("state", "pending")
+    .like("token", `${JOIN_REQUEST_TOKEN_PREFIX}%`)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+
+  const rows = (data ?? []) as Array<{
+    id: string;
+    team_space_id: string;
+    email: string | null;
+    state: InviteState;
+    token: string;
+    created_at: string;
+  }>;
+
+  const admin = createSupabaseServiceClient();
+  const profiles = new Map<string, { email: string | null; name: string | null }>();
+  const userIds = [...new Set(rows.map((row) => parseJoinRequestUserId(row.token)).filter(Boolean))] as string[];
+  if (admin) {
+    const users = await Promise.all(
+      userIds.map(async (userId) => {
+        try {
+          return { userId, result: await admin.auth.admin.getUserById(userId) };
+        } catch (err) {
+          console.error("listJoinRequestsFallback: getUserById failed", userId, err);
+          return null;
+        }
+      }),
+    );
+    users.forEach((entry) => {
+      const user = entry?.result?.data?.user;
+      if (!entry || !user) return;
+      profiles.set(entry.userId, {
+        email: user.email ?? null,
+        name: (user.user_metadata?.name as string | undefined) ?? null,
+      });
+    });
+  }
+
+  return rows.map((row) => {
+    const userId = parseJoinRequestUserId(row.token) ?? "unknown";
+    const profile = profiles.get(userId);
+    return {
+      id: row.id,
+      teamSpaceId: row.team_space_id,
+      userId,
+      name: profile?.name ?? row.email ?? null,
+      email: profile?.email ?? row.email ?? null,
+      message: null,
+      state: "pending",
+      createdAt: row.created_at,
+    };
+  });
+}
+
+async function reviewJoinRequestFallback(
+  supabase: SupabaseClient,
+  params: { teamSpaceId: string; joinRequestId: string; action: "approve" | "reject" },
+): Promise<void> {
+  const { data: requestRow, error: requestError } = await supabase
+    .from("team_invitations")
+    .select("id, team_space_id, email, token, state")
+    .eq("id", params.joinRequestId)
+    .eq("team_space_id", params.teamSpaceId)
+    .like("token", `${JOIN_REQUEST_TOKEN_PREFIX}%`)
+    .maybeSingle();
+  if (requestError) throw requestError;
+  if (!requestRow) throw new Error("Join request not found.");
+  if (requestRow.state !== "pending") throw new Error(`Join request is ${requestRow.state}.`);
+
+  const requesterUserId = parseJoinRequestUserId(requestRow.token);
+  if (!requesterUserId) throw new Error("Join request is malformed.");
+
+  if (params.action === "approve") {
+    const existingMember = await supabase
+      .from("team_members")
+      .select("id")
+      .eq("team_space_id", requestRow.team_space_id)
+      .eq("user_id", requesterUserId)
+      .maybeSingle();
+    if (existingMember.error) throw existingMember.error;
+
+    if (!existingMember.data?.id) {
+      const admin = createSupabaseServiceClient();
+      const requester = admin ? await admin.auth.admin.getUserById(requesterUserId) : null;
+      const memberId = `m-${requestRow.team_space_id}-${requesterUserId.slice(0, 8)}`;
+      const { error: memberError } = await supabase.from("team_members").insert({
+        id: memberId,
+        team_space_id: requestRow.team_space_id,
+        user_id: requesterUserId,
+        name:
+          (requester?.data?.user?.user_metadata?.name as string | undefined) ??
+          requester?.data?.user?.email ??
+          requestRow.email ??
+          "Member",
+        role: "member" as TeamRole,
+      });
+      if (memberError) throw memberError;
+    }
+  }
+
+  const nextState: InviteState = params.action === "approve" ? "accepted" : "revoked";
+  const { error: updateError } = await supabase
+    .from("team_invitations")
+    .update({
+      state: nextState,
+      accepted_by: params.action === "approve" ? requesterUserId : null,
+    })
+    .eq("id", requestRow.id);
+  if (updateError) throw updateError;
+}
+
 function slugify(input: string): string {
   return input
     .toLowerCase()
@@ -471,6 +692,9 @@ export async function createJoinRequest(
     .eq("team_space_id", team.teamSpaceId)
     .eq("user_id", user.id)
     .maybeSingle();
+  if (isMissingJoinRequestsTable(existingRequestError)) {
+    return createJoinRequestFallback(supabase, user, { team, message: params.message });
+  }
   if (existingRequestError) throw existingRequestError;
 
   if (existingRequest?.state === "pending") {
@@ -550,6 +774,9 @@ export async function listJoinRequests(
     .eq("team_space_id", teamSpaceId)
     .eq("state", "pending")
     .order("created_at", { ascending: false });
+  if (isMissingJoinRequestsTable(error)) {
+    return listJoinRequestsFallback(supabase, teamSpaceId);
+  }
   if (error) throw error;
 
   type Row = {
@@ -613,6 +840,10 @@ export async function reviewJoinRequest(
     .eq("id", params.joinRequestId)
     .eq("team_space_id", params.teamSpaceId)
     .maybeSingle();
+  if (isMissingJoinRequestsTable(requestError)) {
+    await reviewJoinRequestFallback(supabase, params);
+    return;
+  }
   if (requestError) throw requestError;
   if (!requestRow) throw new Error("Join request not found.");
   if (requestRow.state !== "pending") throw new Error(`Join request is ${requestRow.state}.`);
