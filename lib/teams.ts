@@ -163,16 +163,32 @@ export async function getJoinLinkTeam(
   supabase: SupabaseClient,
   joinToken: string,
 ): Promise<JoinLinkTeam | null> {
-  const { data, error } = await supabase
+  const primary = await supabase
     .from("team_spaces")
     .select("id, name")
     .eq("join_token", joinToken)
     .maybeSingle();
-  if (error) throw error;
-  if (!data) return null;
+
+  const response =
+    primary.error && primary.error.code === "42703"
+      ? await supabase
+          .from("team_spaces")
+          .select("id, name")
+          .eq("id", joinToken)
+          .maybeSingle()
+      : primary.data
+        ? primary
+        : await supabase
+            .from("team_spaces")
+            .select("id, name")
+            .eq("id", joinToken)
+            .maybeSingle();
+
+  if (response.error) throw response.error;
+  if (!response.data) return null;
   return {
-    teamSpaceId: data.id,
-    teamName: data.name,
+    teamSpaceId: response.data.id,
+    teamName: response.data.name,
   };
 }
 

@@ -939,7 +939,8 @@ function ManageTeamModal({
 
   const canAdmin = team.role === "owner" || team.role === "admin";
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const joinLink = team.joinToken ? `${origin}/join/${team.joinToken}` : null;
+  const joinLinkToken = team.joinToken ?? team.id;
+  const joinLink = `${origin}/join/${joinLinkToken}`;
 
   return (
     <div className="sheet-scrim" onClick={onClose}>
@@ -1041,25 +1042,23 @@ function ManageTeamModal({
               <p className="muted small" style={{ marginTop: 0 }}>
                 Anyone with this link can create an account, then request access for you to approve.
               </p>
-              {joinLink && (
-                <div className="commitment" style={{ gridTemplateColumns: "1fr auto" }}>
-                  <div>
-                    <div className="commitment-title">Join request link</div>
-                    <div className="small muted" style={{ wordBreak: "break-all", marginTop: 4 }}>
-                      {joinLink}
-                    </div>
-                  </div>
-                  <div className="row" style={{ gap: 6 }}>
-                    <button
-                      type="button"
-                      className="btn-ghost small"
-                      onClick={() => navigator.clipboard?.writeText(joinLink)}
-                    >
-                      Copy link
-                    </button>
+              <div className="commitment" style={{ gridTemplateColumns: "1fr auto" }}>
+                <div>
+                  <div className="commitment-title">Join request link</div>
+                  <div className="small muted" style={{ wordBreak: "break-all", marginTop: 4 }}>
+                    {joinLink}
                   </div>
                 </div>
-              )}
+                <div className="row" style={{ gap: 6 }}>
+                  <button
+                    type="button"
+                    className="btn-ghost small"
+                    onClick={() => navigator.clipboard?.writeText(joinLink)}
+                  >
+                    Copy link
+                  </button>
+                </div>
+              </div>
 
               <h4 style={{ marginTop: 18 }}>Invite someone</h4>
               <form onSubmit={invite} className="row" style={{ gap: 8, flexWrap: "wrap" }}>
