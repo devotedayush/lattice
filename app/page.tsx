@@ -39,6 +39,7 @@ type TeamSummary = {
   role: "owner" | "admin" | "member";
   createdAt: string;
   memberName?: string;
+  joinToken?: string | null;
 };
 
 type AuthedFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -791,6 +792,16 @@ type InviteRow = {
   createdAt: string;
 };
 
+type JoinRequestRow = {
+  id: string;
+  userId: string;
+  name: string | null;
+  email: string | null;
+  message?: string | null;
+  state: "pending" | "approved" | "rejected" | "cancelled";
+  createdAt: string;
+};
+
 function ManageTeamModal({
   authedFetch,
   team,
@@ -804,6 +815,7 @@ function ManageTeamModal({
 }) {
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
+  const [joinRequests, setJoinRequests] = useState<JoinRequestRow[]>([]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"admin" | "member">("member");
   const [busy, setBusy] = useState(false);
@@ -812,9 +824,10 @@ function ManageTeamModal({
   const [ok, setOk] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [m, i] = await Promise.all([
+    const [m, i, r] = await Promise.all([
       authedFetch(`/api/v2/teams/${team.id}/members`),
       authedFetch(`/api/v2/teams/${team.id}/invites`),
+      authedFetch(`/api/v2/teams/${team.id}/join-requests`),
     ]);
     if (m.ok) {
       const data = (await m.json()) as { members: MemberRow[] };
@@ -823,6 +836,10 @@ function ManageTeamModal({
     if (i.ok) {
       const data = (await i.json()) as { invites: InviteRow[] };
       setInvites(data.invites ?? []);
+    }
+    if (r.ok) {
+      const data = (await r.json()) as { requests: JoinRequestRow[] };
+      setJoinRequests(data.requests ?? []);
     }
   }, [authedFetch, team.id]);
 
@@ -880,6 +897,22 @@ function ManageTeamModal({
     await load();
   };
 
+  const reviewJoinRequest = async (joinRequestId: string, action: "approve" | "reject") => {
+    setErr(null);
+    setOk(null);
+    const res = await authedFetch(`/api/v2/teams/${team.id}/join-requests`, {
+      method: "PATCH",
+      body: JSON.stringify({ joinRequestId, action }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) {
+      setErr(data.error ?? "Failed to review join request.");
+      return;
+    }
+    setOk(action === "approve" ? "Join request approved." : "Join request rejected.");
+    await load();
+  };
+
   const sendTaskDigest = async () => {
     setSendingDigest(true);
     setErr(null);
@@ -906,6 +939,7 @@ function ManageTeamModal({
 
   const canAdmin = team.role === "owner" || team.role === "admin";
   const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const joinLink = team.joinToken ? `${origin}/join/${team.joinToken}` : null;
 
   return (
     <div className="sheet-scrim" onClick={onClose}>
@@ -1003,6 +1037,30 @@ function ManageTeamModal({
                 </button>
               </div>
 
+              <h4 style={{ marginTop: 18 }}>Shareable join link</h4>
+              <p className="muted small" style={{ marginTop: 0 }}>
+                Anyone with this link can create an account, then request access for you to approve.
+              </p>
+              {joinLink && (
+                <div className="commitment" style={{ gridTemplateColumns: "1fr auto" }}>
+                  <div>
+                    <div className="commitment-title">Join request link</div>
+                    <div className="small muted" style={{ wordBreak: "break-all", marginTop: 4 }}>
+                      {joinLink}
+                    </div>
+                  </div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button
+                      type="button"
+                      className="btn-ghost small"
+                      onClick={() => navigator.clipboard?.writeText(joinLink)}
+                    >
+                      Copy link
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <h4 style={{ marginTop: 18 }}>Invite someone</h4>
               <form onSubmit={invite} className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                 <input
@@ -1021,6 +1079,48 @@ function ManageTeamModal({
                   Send
                 </button>
               </form>
+            </>
+          )}
+
+          {canAdmin && joinRequests.length > 0 && (
+            <>
+              <h4 style={{ marginTop: 18 }}>Join requests</h4>
+              <div className="stack" style={{ gap: 8 }}>
+                {joinRequests.map((request) => (
+                  <div key={request.id} className="commitment" style={{ gridTemplateColumns: "1fr auto" }}>
+                    <div>
+                      <div className="commitment-title">
+                        {request.name || request.email || request.userId}
+                      </div>
+                      <div className="commitment-meta">
+                        {request.email && <span>{request.email}</span>}
+                        <span>· {request.state}</span>
+                      </div>
+                      {request.message && (
+                        <div className="small muted" style={{ marginTop: 4 }}>
+                          {request.message}
+                        </div>
+                      )}
+                    </div>
+                    <div className="row" style={{ gap: 6 }}>
+                      <button
+                        type="button"
+                        className="btn-primary small"
+                        onClick={() => void reviewJoinRequest(request.id, "approve")}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost small"
+                        onClick={() => void reviewJoinRequest(request.id, "reject")}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </>
           )}
 
