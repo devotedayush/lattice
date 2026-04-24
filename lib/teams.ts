@@ -90,11 +90,20 @@ export async function listUserTeams(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<TeamSummary[]> {
-  const { data, error } = await supabase
+  const primary = await supabase
     .from("team_members")
     .select("role, team_space_id, name, team_spaces(id, name, created_by, join_token)")
     .eq("user_id", userId);
-  if (error) throw error;
+
+  const response =
+    primary.error && primary.error.code === "42703"
+      ? await supabase
+          .from("team_members")
+          .select("role, team_space_id, name, team_spaces(id, name, created_by)")
+          .eq("user_id", userId)
+      : primary;
+
+  if (response.error) throw response.error;
   type Row = {
     role: TeamRole;
     team_space_id: string;
@@ -104,7 +113,7 @@ export async function listUserTeams(
       | { id: string; name: string; created_by: string | null; join_token: string | null }[]
       | null;
   };
-  return ((data ?? []) as Row[]).map((row) => {
+  return ((response.data ?? []) as Row[]).map((row) => {
     const space = Array.isArray(row.team_spaces) ? row.team_spaces[0] : row.team_spaces;
     return {
       id: row.team_space_id,
