@@ -771,11 +771,11 @@ function CreateTeamModal({
 
 // Manage members + invites modal.
 type MemberRow = {
+  id: string;
   userId: string;
   role: "owner" | "admin" | "member";
   name: string | null;
   email: string | null;
-  joinedAt: string;
   skills?: string[];
   focus?: string | null;
   bio?: string | null;
@@ -968,7 +968,7 @@ function ManageTeamModal({
                       <select
                         value={m.role}
                         onChange={(e) =>
-                          changeRole(m.userId, e.target.value as "owner" | "admin" | "member")
+                          changeRole(m.id, e.target.value as "owner" | "admin" | "member")
                         }
                         disabled={team.role !== "owner" && m.role === "owner"}
                       >
@@ -976,7 +976,7 @@ function ManageTeamModal({
                         <option value="admin">admin</option>
                         <option value="member">member</option>
                       </select>
-                      <button className="btn-ghost small" onClick={() => removeMember(m.userId)}>
+                      <button className="btn-ghost small" onClick={() => removeMember(m.id)}>
                         Remove
                       </button>
                     </div>
